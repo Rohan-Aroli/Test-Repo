@@ -298,33 +298,27 @@ class DatabaseWriter:
 
     def save_driver_baseline(self, driver_id, baseline_payload):
         payload = {
-            "id": str(driver_id),
-            "created_at": self._timestamp(),
-            "ear": self._float(baseline_payload.get("ear_mean")),
-            "perclos": self._float(baseline_payload.get("perclos_mean")),
-            "blink_rate": self._int(baseline_payload.get("blink_rate_mean")),
-            "driver_state": "NORMAL",
-            "eye_closure_duration": self._float(
-                baseline_payload.get("eye_closure_duration_mean")
-            ),
             "driver_id": str(driver_id),
+            "avg_ear": self._float(baseline_payload.get("avg_ear")),
+            "avg_mar": self._float(baseline_payload.get("avg_mar")),
+            "avg_perclos": self._float(baseline_payload.get("avg_perclos")),
+            "avg_blink_rate": self._float(
+                baseline_payload.get("avg_blink_rate")
+            ),
+            "avg_eye_closure_duration": self._float(
+                baseline_payload.get("avg_eye_closure_duration")
+            ),
+            "sample_count": self._int(baseline_payload.get("sample_count")),
         }
 
-        table = self.client.table("driver_metrics")
-        existing = table.select("id").eq("id", str(driver_id)).limit(1).execute()
-        if existing.data:
-            return table.update(payload).eq("id", str(driver_id)).execute()
-        return table.insert(payload).execute()
+        return self.client.table("driver_baselines").upsert(payload).execute()
 
     def get_driver_baseline(self, driver_id):
         response = (
             self.client
-            .table("driver_metrics")
+            .table("driver_baselines")
             .select("*")
             .eq("driver_id", str(driver_id))
-            .eq("driver_state", "NORMAL")
-            .is_("trip_id", "null")
-            .order("created_at", desc=True)
             .limit(1)
             .execute()
         )

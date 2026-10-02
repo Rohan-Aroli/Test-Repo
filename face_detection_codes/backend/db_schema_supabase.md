@@ -4,7 +4,7 @@
 
 | Name | Type | Constraints |
 |------|------|-------------|
-| `id` | `text` | Primary; user-entered Driver ID for baseline rows, generated text ID for live metrics |
+| `id` | `int8` | Primary |
 | `created_at` | `timestamptz` |  Nullable |
 | `ear` | `float8` |  Nullable |
 | `perclos` | `float8` |  Nullable |
@@ -13,8 +13,22 @@
 | `fatigue_score` | `float8` |  Nullable |
 | `head_pose` | `text` |  Nullable |
 | `eye_closure_duration` | `float8` |  Nullable |
-| `driver_id` | `text` |  Nullable; user-entered Driver ID, not the auto-generated `id` primary key |
+| `driver_id` | `uuid` |  Nullable |
 | `trip_id` | `uuid` |  Nullable |
+
+## Table `driver_baselines`
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `driver_id` | `text` | Primary; formatted application Driver ID |
+| `avg_ear` | `float8` |  Nullable |
+| `avg_mar` | `float8` |  Nullable |
+| `avg_perclos` | `float8` |  Nullable |
+| `avg_blink_rate` | `float8` |  Nullable |
+| `avg_eye_closure_duration` | `float8` |  Nullable |
+| `sample_count` | `int4` |  Nullable |
+| `created_at` | `timestamptz` |  Default `now()` |
+| `updated_at` | `timestamptz` |  Default `now()` |
 
 ## Table `vehicle_metrics`
 

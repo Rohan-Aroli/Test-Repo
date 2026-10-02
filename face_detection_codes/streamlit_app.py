@@ -6,6 +6,7 @@ import sys
 import time
 from datetime import time as clock_time
 from pathlib import Path
+from uuid import uuid4
 
 import cv2
 import streamlit as st
@@ -69,35 +70,58 @@ def stddev(values):
 
 
 def build_baseline_from_samples(samples):
-    if not samples:
+    valid_samples = []
+    for sample in samples:
+        try:
+            values = (
+                sample.get("ear"),
+                sample.get("mar"),
+                sample.get("perclos"),
+                sample.get("blink_rate"),
+                sample.get("eye_closure_duration"),
+            )
+            if any(value is None for value in values):
+                continue
+            [float(value) for value in values]
+        except (TypeError, ValueError):
+            continue
+        valid_samples.append(sample)
+
+    if not valid_samples:
         return {
-            "ear_mean": 0.0,
-            "ear_std": 0.0,
-            "perclos_mean": 0.0,
-            "perclos_std": 0.0,
-            "blink_rate_mean": 0.0,
-            "blink_rate_std": 0.0,
-            "eye_closure_duration_mean": 0.0,
-            "eye_closure_duration_std": 0.0,
+            "avg_ear": 0.0,
+            "avg_mar": 0.0,
+            "avg_perclos": 0.0,
+            "avg_blink_rate": 0.0,
+            "avg_eye_closure_duration": 0.0,
             "sample_count": 0,
         }
 
-    ear_values = [sample.get("ear") for sample in samples]
-    perclos_values = [sample.get("perclos") for sample in samples]
-    blink_values = [sample.get("blink_rate") for sample in samples]
-    closure_values = [sample.get("eye_closure_duration") for sample in samples]
+    ear_values = [sample.get("ear") for sample in valid_samples]
+    mar_values = [sample.get("mar") for sample in valid_samples]
+    perclos_values = [sample.get("perclos") for sample in valid_samples]
+    blink_values = [sample.get("blink_rate") for sample in valid_samples]
+    closure_values = [sample.get("eye_closure_duration") for sample in valid_samples]
 
     baseline = {
-        "ear_mean": average(ear_values),
-        "ear_std": stddev(ear_values),
-        "perclos_mean": average(perclos_values),
-        "perclos_std": stddev(perclos_values),
-        "blink_rate_mean": average(blink_values),
-        "blink_rate_std": stddev(blink_values),
-        "eye_closure_duration_mean": average(closure_values),
-        "eye_closure_duration_std": stddev(closure_values),
-        "sample_count": len(samples),
+        "avg_ear": average(ear_values),
+        "avg_mar": average(mar_values),
+        "avg_perclos": average(perclos_values),
+        "avg_blink_rate": average(blink_values),
+        "avg_eye_closure_duration": average(closure_values),
+        "sample_count": len(valid_samples),
     }
+    baseline.update({
+        "ear_mean": baseline["avg_ear"],
+        "ear_std": stddev(ear_values),
+        "mar_mean": baseline["avg_mar"],
+        "perclos_mean": baseline["avg_perclos"],
+        "perclos_std": stddev(perclos_values),
+        "blink_rate_mean": baseline["avg_blink_rate"],
+        "blink_rate_std": stddev(blink_values),
+        "eye_closure_duration_mean": baseline["avg_eye_closure_duration"],
+        "eye_closure_duration_std": stddev(closure_values),
+    })
     return baseline
 
 
@@ -185,8 +209,7 @@ def collect_baseline_rough_work(
 def register_driver(driver_id: str, profile: dict, baseline_summary: dict):
     driver = db.find_driver(driver_id)
     if driver is None:
-        driver = db.register_driver(driver_id, profile)
-    db.save_driver_baseline(driver_id, baseline_summary)
+        driver = db.register_driver(str(uuid4()), profile)
     local_baseline_path = BASELINE_DIR / f"{driver['id']}.json"
     local_baseline_path.write_text(
         json.dumps(baseline_summary, indent=2),
@@ -208,9 +231,8 @@ def start_monitoring_process(driver_id: str, profile: dict):
         [sys.executable, str(project_root / "main.py")],
         cwd=str(project_root),
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     return process
 
