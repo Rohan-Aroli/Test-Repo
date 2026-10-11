@@ -120,6 +120,25 @@ def test_event_rates_are_derived_from_history():
     assert result.distracted_time_pct == pytest.approx(1.0)
     assert result.emergency_risk_rate is not None
 
+def test_distracted_time_and_emergency_risk_rate_aggregated():
+    trips = [
+        make_trip(
+            "trip-1",
+            1.0,
+            BASE - timedelta(days=1),
+        ),
+    ]
+    trips[0].distracted_time_pct = 15.0
+    trips[0].emergency_risk_rate = 5.0
+
+    result = HistoricalFeatureEngine().aggregate(
+        trips,
+        BASE,
+    )
+
+    assert result.distracted_time_pct == pytest.approx(15.0)
+    assert result.emergency_risk_rate == pytest.approx(5.0)
+
 
 def test_recent_trip_has_more_recency_weight():
     trips = [

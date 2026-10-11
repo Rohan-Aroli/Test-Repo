@@ -122,6 +122,12 @@ class DatabaseWriter:
             "eye_closure_duration": self._float(
                 metrics.get("avg_closure_duration")
             ),
+            "yawn_count": self._int(metrics.get("yawn_count")),
+            "avg_yawn_duration": self._float(metrics.get("avg_yawn_duration")),
+            "microsleep_count": self._int(metrics.get("microsleep_count")),
+            "continuous_eye_closure": self._float(metrics.get("continuous_eye_closure")),
+            "microsleep_detected": bool(metrics.get("microsleep_detected")),
+            "avg_microsleep_duration": self._float(metrics.get("avg_microsleep_duration")),
             "driver_id": str(driver_id),
             "trip_id": str(trip_id),
             "created_at": self._timestamp(),

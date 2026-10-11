@@ -16,12 +16,17 @@ def start_face_detection():
     
 
     try:
+        import os
+        kwargs = {}
+        if os.name == 'nt':
+            kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+
         face_process = subprocess.Popen(
             [
                 face_python,
                 face_main
             ],
-            creationflags=subprocess.CREATE_NEW_CONSOLE
+            **kwargs
         )
 
         # Give it a moment to fail if it's going to
@@ -47,3 +52,7 @@ def stop_face_detection():
         print("🛑 Stopping face detection...")
         face_process.terminate()
         face_process.wait()
+
+def is_face_detection_running():
+    global face_process
+    return face_process is not None and face_process.poll() is None

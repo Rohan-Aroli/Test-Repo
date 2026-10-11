@@ -198,6 +198,39 @@ class ScoreRepository:
             "blink_deviation":
                 features.blink_deviation,
 
+            "yawn_count":
+                features.yawn_count,
+
+            "yawn_rate":
+                features.yawn_rate,
+
+            "avg_yawn_duration":
+                features.avg_yawn_duration,
+
+            "microsleep_count":
+                features.microsleep_count,
+
+            "microsleep_rate":
+                features.microsleep_rate,
+
+            "avg_microsleep_duration":
+                features.avg_microsleep_duration,
+
+            "max_microsleep_duration":
+                features.max_microsleep_duration,
+
+            "distraction_count":
+                features.distraction_count,
+
+            "distraction_rate":
+                features.distraction_rate,
+
+            "distracted_seconds":
+                features.distracted_seconds,
+
+            "distracted_time_pct":
+                features.distracted_time_pct,
+
             "emergency_count":
                 features.emergency_count,
 
@@ -342,6 +375,9 @@ class ScoreRepository:
                 )
             except ValueError:
                 pass
+
+        # Remove DB specific id column before creating domain model
+        converted.pop("id", None)
 
         return TripFeatures(
             **converted

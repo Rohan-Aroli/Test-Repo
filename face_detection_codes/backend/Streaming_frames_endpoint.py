@@ -24,7 +24,7 @@ def generate_frames():
     while True:
 
         try:
-            latest_frame = (
+            latest_frame, timestamp = (
                 frame_bridge.receive_frame()
             )
 
@@ -72,15 +72,19 @@ def home():
 
 @app.get("/health")
 def health():
-
-    latest = (
+    import time
+    latest_frame, timestamp = (
         frame_bridge.receive_frame()
     )
 
+    is_active = False
+    if latest_frame is not None:
+        if (time.time() - timestamp) < 5.0:
+            is_active = True
+
     return {
         "backend_status": "healthy",
-        "camera_stream_active":
-            latest is not None
+        "camera_stream_active": is_active
     }
 
 

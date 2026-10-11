@@ -119,68 +119,69 @@ def register_new_driver(identifier):
     return driver
 
 
-entered_driver_id = os.getenv("DRIVER_ID")
-if not entered_driver_id:
-    entered_driver_id = input(
-        "Enter employee ID or driver UUID: "
-    ).strip().lower()
-driver_profile = database_writer.find_driver(entered_driver_id)
-
-if not driver_profile:
-    driver_profile = register_new_driver(entered_driver_id)
-
-driver_id = driver_profile["id"]
-
-driver_manager.set_driver(
-    driver_id
-)
-
-calibrator = BaselineCalibrator(
-    calibration_time=60
-)
-
-calibrator.set_driver(
-    driver_id
-)
-
-if calibrator.load_baseline():
-
-    print(
-        "[INFO] Existing baseline loaded"
-    )
-
-    mode_manager.set_mode(
-        "MONITORING"
-    )
-
-else:
-
-    print(
-        "[INFO] No baseline found."
-    )
-
-    mode_manager.set_mode(
-        "CALIBRATION"
-    )
-
-classifier = EnhancedDriverStateClassifier(
-    profile=calibrator.get_baseline()
-)
-drowsy_detector.ear_threshold = classifier.get_ear_threshold()
-cap = cv2.VideoCapture(0)
-detector = FaceDetector()
-extractor = EyeLandmarkExtractor()
+# Globals for initialization
+driver_id = None
+cap = None
+detector = None
+extractor = None
 last_uploaded_state = None
-trip_start_time = datetime.utcnow()
-trip = database_writer.start_trip(
-    driver_id,
-    trip_start_time,
-    driver_profile,
-)
-current_trip_id = trip["trip_id"]
+trip_start_time = None
+current_trip_id = None
+classifier = None
+scoring_pipeline = None
 
-score_repository = ScoreRepository(supabase)
-scoring_pipeline = ScoringPipeline(score_repository)
+
+def init_pipeline():
+    global driver_id, cap, detector, extractor, last_uploaded_state
+    global trip_start_time, current_trip_id, classifier, scoring_pipeline
+
+    from datetime import timezone
+
+    entered_driver_id = os.getenv("DRIVER_ID")
+    if not entered_driver_id:
+        entered_driver_id = input(
+            "Enter employee ID or driver UUID: "
+        ).strip().lower()
+    driver_profile = database_writer.find_driver(entered_driver_id)
+
+    if not driver_profile:
+        driver_profile = register_new_driver(entered_driver_id)
+
+    driver_id = driver_profile["id"]
+    driver_manager.set_driver(driver_id)
+
+    calibrator = BaselineCalibrator(calibration_time=60)
+    calibrator.set_driver(driver_id)
+
+    if calibrator.load_baseline():
+        print("[INFO] Existing baseline loaded")
+        mode_manager.set_mode("MONITORING")
+    else:
+        print("[INFO] No baseline found.")
+        mode_manager.set_mode("CALIBRATION")
+
+    classifier = EnhancedDriverStateClassifier(
+        profile=calibrator.get_baseline()
+    )
+    drowsy_detector.ear_threshold = classifier.get_ear_threshold()
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        raise RuntimeError("Failed to open webcam.")
+
+    detector = FaceDetector()
+    extractor = EyeLandmarkExtractor()
+    last_uploaded_state = None
+    trip_start_time = datetime.now(timezone.utc)
+    trip = database_writer.start_trip(
+        driver_id,
+        trip_start_time,
+        driver_profile,
+    )
+    current_trip_id = trip["trip_id"]
+
+    score_repository = ScoreRepository(supabase)
+    scoring_pipeline = ScoringPipeline(score_repository)
 
 
 # ---------------- START FASTAPI SERVER ----------------
@@ -201,8 +202,9 @@ def start_api():
 
 def finalize_trip_score():
     """Compute and persist DriverScore for the current trip."""
+    from datetime import timezone
     try:
-        trip_end_time = datetime.utcnow()
+        trip_end_time = datetime.now(timezone.utc)
 
         database_writer.end_trip(
             current_trip_id,
@@ -232,6 +234,9 @@ def finalize_trip_score():
 # ---------------- MAIN PIPELINE ----------------
 def run_face_detection():
     global last_uploaded_state
+    if cap is None:
+        init_pipeline()
+
     print(" DRIVER MONITORING SYSTEM STARTED")
     print(
     f"[ACTIVE DRIVER] {driver_id}"
@@ -413,6 +418,11 @@ def run_face_detection():
                         "microsleep_count":
                             micro_metrics[
                                 "microsleep_count"
+                            ],
+
+                        "avg_microsleep_duration":
+                            micro_metrics[
+                                "avg_microsleep_duration"
                             ],
 
                         "pitch":

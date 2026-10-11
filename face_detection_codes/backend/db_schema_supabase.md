@@ -13,6 +13,12 @@
 | `fatigue_score` | `float8` |  Nullable |
 | `head_pose` | `text` |  Nullable |
 | `eye_closure_duration` | `float8` |  Nullable |
+| `yawn_count` | `int4` |  Nullable |
+| `avg_yawn_duration` | `float8` |  Nullable |
+| `microsleep_count` | `int4` |  Nullable |
+| `continuous_eye_closure` | `float8` |  Nullable |
+| `microsleep_detected` | `bool` |  Nullable |
+| `avg_microsleep_duration` | `float8` |  Nullable |
 | `driver_id` | `text` |  Nullable; user-entered Driver ID, not the auto-generated `id` primary key |
 | `trip_id` | `uuid` |  Nullable |
 

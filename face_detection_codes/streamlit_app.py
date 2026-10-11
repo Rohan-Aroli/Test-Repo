@@ -204,11 +204,12 @@ def start_monitoring_process(driver_id: str, profile: dict):
         env.pop("DRIVER_PROFILE_JSON", None)
 
     project_root = BASE_DIR
+    log_file = open(project_root / "monitoring_subprocess.log", "w")
     process = subprocess.Popen(
         [sys.executable, str(project_root / "main.py")],
         cwd=str(project_root),
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
     )

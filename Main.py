@@ -10,11 +10,9 @@ def main():
     try:
         start_face_detection()
 
-        # 🔥 Keep CARLA running continuously
-        # while True:
-        #     run_carla()
-        #     print("⚠️ CARLA exited unexpectedly. Restarting...")
-        #     time.sleep(2)
+        from subprocess_launcher import is_face_detection_running
+        while is_face_detection_running():
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n🛑 Ctrl+C detected. Shutting down...")

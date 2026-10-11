@@ -1,14 +1,16 @@
 from pathlib import Path
-import subprocess
+import os
+import sys
 
 BASE_DIR = Path(__file__).resolve().parent
+BASELINE_DIR = BASE_DIR / "face_detection_codes" / "baselines"
+BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 
-face_python = BASE_DIR / "face_detection_codes" / "facedetection" / "Scripts" / "python.exe"
+face_python = Path(os.getenv("DRIVER_MONITOR_PYTHON", sys.executable))
 face_main = BASE_DIR / "face_detection_codes" / "main.py"
 
-# Safety check
 if not face_python.exists():
     raise FileNotFoundError(
-        f"❌ Face detection env not found:\n{face_python}\n"
-        "👉 Run: python setup_face_env.py"
+        f"❌ Face detection Python not found:\n{face_python}\n"
+        "Set DRIVER_MONITOR_PYTHON environment variable to point to the correct interpreter."
     )
