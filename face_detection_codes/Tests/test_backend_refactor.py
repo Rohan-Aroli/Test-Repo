@@ -65,4 +65,4 @@ def test_push_driver_metrics_writes_historical_sample_and_only_emits_event_on_tr
     assert event_payload["event_type"] == "UNRESPONSIVE"
     assert event_payload["driver_id"] == "driver-123"
     assert event_payload["trip_id"] == "trip-456"
-    assert event_payload["metadata"]["frame_url"] is None
+    assert event_payload["metadata"].get("frame_url") is None

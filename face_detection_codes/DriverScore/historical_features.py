@@ -148,6 +148,20 @@ class HistoricalFeatureEngine:
                 weight
             )
 
+            self._add_weighted(
+                weighted,
+                "distracted_time_pct",
+                trip.distracted_time_pct,
+                weight
+            )
+
+            self._add_weighted(
+                weighted,
+                "emergency_risk_rate",
+                trip.emergency_risk_rate,
+                weight
+            )
+
             # --------------------------------
             # Event totals
             # --------------------------------
@@ -293,7 +307,11 @@ class HistoricalFeatureEngine:
                 weighted_hours
             ),
 
-            distracted_time_pct=None,
+            distracted_time_pct=
+                self._weighted_value(
+                    weighted,
+                    "distracted_time_pct"
+                ),
 
             emergency_rate=self._rate(
                 event_totals[
@@ -302,7 +320,11 @@ class HistoricalFeatureEngine:
                 weighted_hours
             ),
 
-            emergency_risk_rate=None,
+            emergency_risk_rate=
+                self._weighted_value(
+                    weighted,
+                    "emergency_risk_rate"
+                ),
 
             avg_speed=
                 self._weighted_value(
