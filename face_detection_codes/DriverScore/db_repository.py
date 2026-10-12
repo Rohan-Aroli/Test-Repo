@@ -16,46 +16,58 @@ class ScoreRepository:
         self,
         trip_id
     ):
-
-        response = (
-            self.supabase
-            .table("driver_metrics")
-            .select("*")
-            .eq("trip_id", trip_id)
-            .execute()
-        )
-
-        return response.data or []
+        if not self.supabase:
+            return []
+        try:
+            response = (
+                self.supabase
+                .table("driver_metrics")
+                .select("*")
+                .eq("trip_id", trip_id)
+                .execute()
+            )
+            return (response and getattr(response, "data", None)) or []
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] get_trip_driver_metrics: {e}")
+            return []
 
     def get_trip_vehicle_metrics(
         self,
         trip_id
     ):
-
-        response = (
-            self.supabase
-            .table("vehicle_metrics")
-            .select("*")
-            .eq("trip_id", trip_id)
-            .execute()
-        )
-
-        return response.data or []
+        if not self.supabase:
+            return []
+        try:
+            response = (
+                self.supabase
+                .table("vehicle_metrics")
+                .select("*")
+                .eq("trip_id", trip_id)
+                .execute()
+            )
+            return (response and getattr(response, "data", None)) or []
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] get_trip_vehicle_metrics: {e}")
+            return []
 
     def get_trip_emergency_events(
         self,
         trip_id
     ):
-
-        response = (
-            self.supabase
-            .table("emergency_events")
-            .select("*")
-            .eq("trip_id", trip_id)
-            .execute()
-        )
-
-        return response.data or []
+        if not self.supabase:
+            return []
+        try:
+            response = (
+                self.supabase
+                .table("emergency_events")
+                .select("*")
+                .eq("trip_id", trip_id)
+                .execute()
+            )
+            return (response and getattr(response, "data", None)) or []
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] get_trip_emergency_events: {e}")
+            return []
 
     # ======================================
     # Driver profile
@@ -65,17 +77,21 @@ class ScoreRepository:
         self,
         driver_id
     ):
-
-        response = (
-            self.supabase
-            .table("drivers")
-            .select("*")
-            .eq("id", driver_id)
-            .single()
-            .execute()
-        )
-
-        return response.data or {}
+        if not self.supabase:
+            return {}
+        try:
+            response = (
+                self.supabase
+                .table("drivers")
+                .select("*")
+                .eq("id", driver_id)
+                .single()
+                .execute()
+            )
+            return (response and getattr(response, "data", None)) or {}
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] get_driver_profile: {e}")
+            return {}
 
     # ======================================
     # Baseline
@@ -85,11 +101,10 @@ class ScoreRepository:
         self,
         driver_id
     ):
-
-        baseline_path = (
-            Path("baselines") /
-            f"{driver_id}.json"
-        )
+        base_dir = Path(__file__).resolve().parent.parent
+        baseline_path = base_dir / "baselines" / f"{driver_id}.json"
+        if not baseline_path.exists():
+            baseline_path = Path("baselines") / f"{driver_id}.json"
 
         if not baseline_path.exists():
             return {}
@@ -108,28 +123,28 @@ class ScoreRepository:
         self,
         driver_id
     ):
-
-        response = (
-            self.supabase
-            .table("trip_features")
-            .select("*")
-            .eq("driver_id", driver_id)
-            .order(
-                "calculated_at",
-                desc=False
+        if not self.supabase:
+            return []
+        try:
+            response = (
+                self.supabase
+                .table("trip_features")
+                .select("*")
+                .eq("driver_id", driver_id)
+                .order(
+                    "calculated_at",
+                    desc=False
+                )
+                .execute()
             )
-            .execute()
-        )
-
-        # Convert DB rows to TripFeatures
-        # objects here.
-
-        return [
-            self._trip_features_from_row(row)
-            for row in (
-                response.data or []
-            )
-        ]
+            data = (response and getattr(response, "data", None)) or []
+            return [
+                self._trip_features_from_row(row)
+                for row in data
+            ]
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] get_previous_trip_features: {e}")
+            return []
 
     # ======================================
     # Save trip features
@@ -262,12 +277,18 @@ class ScoreRepository:
                 features.vehicle_data_coverage,
         }
 
-        return (
-            self.supabase
-            .table("trip_features")
-            .insert(payload)
-            .execute()
-        )
+        if not self.supabase:
+            return None
+        try:
+            return (
+                self.supabase
+                .table("trip_features")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] save_trip_features: {e}")
+            return None
 
     # ======================================
     # Save score
@@ -329,12 +350,18 @@ class ScoreRepository:
                 score.normalization_version,
         }
 
-        return (
-            self.supabase
-            .table("driver_score_history")
-            .insert(payload)
-            .execute()
-        )
+        if not self.supabase:
+            return None
+        try:
+            return (
+                self.supabase
+                .table("driver_score_history")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] save_score_history: {e}")
+            return None
 
     # ======================================
     # Critical events
@@ -344,17 +371,22 @@ class ScoreRepository:
         self,
         driver_id
     ):
+        if not self.supabase:
+            return 0
+        try:
+            response = (
+                self.supabase
+                .table("emergency_events")
+                .select("id")
+                .eq("driver_id", driver_id)
+                .eq("severity", "critical")
+                .execute()
+            )
 
-        response = (
-            self.supabase
-            .table("emergency_events")
-            .select("id")
-            .eq("driver_id", driver_id)
-            .eq("severity", "critical")
-            .execute()
-        )
-
-        return len(response.data or [])
+            return len((response and getattr(response, "data", None)) or [])
+        except Exception as e:
+            print(f"[SCORE REPO WARNING] count_recent_critical_events: {e}")
+            return 0
 
     # ======================================
     # Conversion

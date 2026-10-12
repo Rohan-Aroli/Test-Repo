@@ -1,4 +1,12 @@
 
+import sys
+from pathlib import Path
+
+# Ensure face_detection_codes is first on sys.path
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+
 import cv2
 import json
 import os
@@ -76,21 +84,28 @@ def request_stop():
 
 
 def prompt_optional(label):
-    if os.getenv("DASHBOARD_MODE") == "1":
+    if os.getenv("DASHBOARD_MODE") == "1" or not sys.stdin.isatty():
         return None
-    value = input(f"{label} (optional): ").strip()
-    return value or None
+    try:
+        value = input(f"{label} (optional): ").strip()
+        return value or None
+    except (EOFError, OSError):
+        return None
 
 
 def register_new_driver(identifier):
     print("\nNew driver registration")
+    identifier = identifier or "default_driver"
     profile_json = os.getenv("DRIVER_PROFILE_JSON")
     profile_values = json.loads(profile_json) if profile_json else {}
     name = profile_values.get("name")
-    if not name and os.getenv("DASHBOARD_MODE") != "1":
-        name = input("Name: ").strip()
+    if not name and os.getenv("DASHBOARD_MODE") != "1" and sys.stdin.isatty():
+        try:
+            name = input("Name: ").strip()
+        except (EOFError, OSError):
+            name = None
     if not name:
-        raise ValueError("Driver name is required.")
+        name = f"Driver {identifier}"
 
     age_text = profile_values.get("age") or prompt_optional("Age")
     age = int(age_text) if age_text else None
@@ -115,7 +130,7 @@ def register_new_driver(identifier):
         str(uuid4()),
         profile,
     )
-    print(f"[INFO] Driver registered: {driver['name']}")
+    print(f"[INFO] Driver registered: {driver.get('name', name)}")
     return driver
 
 
@@ -139,15 +154,22 @@ def init_pipeline():
 
     entered_driver_id = os.getenv("DRIVER_ID")
     if not entered_driver_id:
-        entered_driver_id = input(
-            "Enter employee ID or driver UUID: "
-        ).strip().lower()
+        if sys.stdin.isatty():
+            try:
+                entered_driver_id = input(
+                    "Enter employee ID or driver UUID: "
+                ).strip().lower()
+            except (EOFError, OSError):
+                entered_driver_id = None
+        if not entered_driver_id:
+            entered_driver_id = "default_driver"
+
     driver_profile = database_writer.find_driver(entered_driver_id)
 
     if not driver_profile:
         driver_profile = register_new_driver(entered_driver_id)
 
-    driver_id = driver_profile["id"]
+    driver_id = driver_profile.get("id") or str(uuid4())
     driver_manager.set_driver(driver_id)
 
     calibrator = BaselineCalibrator(calibration_time=60)
@@ -167,7 +189,10 @@ def init_pipeline():
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
-        raise RuntimeError("Failed to open webcam.")
+        if os.getenv("DRY_RUN") == "1":
+            print("[WARNING] Failed to open webcam in DRY_RUN mode. Proceeding with dummy camera.")
+        else:
+            raise RuntimeError("Failed to open webcam.")
 
     detector = FaceDetector()
     extractor = EyeLandmarkExtractor()
@@ -178,7 +203,7 @@ def init_pipeline():
         trip_start_time,
         driver_profile,
     )
-    current_trip_id = trip["trip_id"]
+    current_trip_id = trip.get("trip_id") or str(uuid4())
 
     score_repository = ScoreRepository(supabase)
     scoring_pipeline = ScoringPipeline(score_repository)
@@ -188,12 +213,21 @@ def init_pipeline():
 def start_api():
     try:
         print("[INFO] Starting FastAPI streaming server...")
+        import socket
+        base_port = int(os.getenv("STREAM_PORT", "8000"))
+        port = base_port
+
+        for p in range(base_port, base_port + 20):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("127.0.0.1", p)) != 0:
+                    port = p
+                    break
 
         uvicorn.run(
             stream.app,
             host="127.0.0.1",
-            port=8000,
-            log_level="info"
+            port=port,
+            log_level="warning"
         )
 
     except Exception as e:
@@ -204,6 +238,9 @@ def finalize_trip_score():
     """Compute and persist DriverScore for the current trip."""
     from datetime import timezone
     try:
+        if not current_trip_id or not scoring_pipeline:
+            return
+
         trip_end_time = datetime.now(timezone.utc)
 
         database_writer.end_trip(
@@ -241,14 +278,22 @@ def run_face_detection():
     print(
     f"[ACTIVE DRIVER] {driver_id}"
     )
-    
 
     while not stop_requested.is_set():
         try:
-            ret, frame = cap.read()
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+            elif os.getenv("DRY_RUN") == "1":
+                import numpy as np
+                ret, frame = True, np.zeros((480, 640, 3), dtype=np.uint8)
+            else:
+                ret, frame = False, None
 
             if not ret or frame is None:
                 print("[ERROR] Camera frame not received")
+                if os.getenv("DRY_RUN") == "1":
+                    break
+                time.sleep(0.1)
                 continue
 
             # --------------------------------------------
@@ -746,17 +791,24 @@ def run_face_detection():
                     2
                 )
 
-            cv2.imshow("Driver Monitoring System", frame)
+            if os.getenv("HEADLESS") != "1" and os.getenv("DRY_RUN") != "1":
+                cv2.imshow("Driver Monitoring System", frame)
 
-            if cv2.waitKey(1) & 0xFF == 27:
-                print("[INFO] Exiting system...")
+                if cv2.waitKey(1) & 0xFF == 27:
+                    print("[INFO] Exiting system...")
+                    break
+            elif os.getenv("DRY_RUN") == "1":
+                print("[INFO] Dry run single cycle completed successfully.")
                 break
 
         except Exception as e:
             print(f"[CRITICAL ERROR] Main loop failure: {e}")
+            if os.getenv("DRY_RUN") == "1":
+                break
             continue
 
-    cap.release()
+    if cap is not None and hasattr(cap, "release") and cap.isOpened():
+        cap.release()
     cv2.destroyAllWindows()
     finalize_trip_score()
 

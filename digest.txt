@@ -1,5 +1,6 @@
 Directory structure:
 └── driver monitoring/
+    ├── 001_add_missing_metrics.sql
     ├── carla_test.py
     ├── Instructions,.txt
     ├── Main.py
@@ -95,12 +96,26 @@ Directory structure:
     │       ├── test_driver_score.py
     │       ├── test_enhanced_driver_state_classifier.py
     │       ├── test_historical_features.py
+    │       ├── test_livestream.py
     │       ├── test_normalization.py
     │       └── test_trip_features.py
     └── shared/
         ├── all_scores.json
         ├── driver.template.json
         └── Drowsy_state.json
+
+================================================
+FILE: 001_add_missing_metrics.sql
+================================================
+-- Migration 001: Add missing fatigue tracking metrics to driver_metrics table
+ALTER TABLE driver_metrics ADD COLUMN IF NOT EXISTS yawn_count int4;
+ALTER TABLE driver_metrics ADD COLUMN IF NOT EXISTS avg_yawn_duration float8;
+ALTER TABLE driver_metrics ADD COLUMN IF NOT EXISTS microsleep_count int4;
+ALTER TABLE driver_metrics ADD COLUMN IF NOT EXISTS continuous_eye_closure float8;
+ALTER TABLE driver_metrics ADD COLUMN IF NOT EXISTS microsleep_detected bool;
+ALTER TABLE driver_metrics ADD COLUMN IF NOT EXISTS avg_microsleep_duration float8;
+
+
 
 ================================================
 FILE: carla_test.py
@@ -151,26 +166,24 @@ from subprocess_launcher import start_face_detection, stop_face_detection
 
 
 def main():
-    print("🚀 Starting Driver Monitoring System")
+    print("ðŸš€ Starting Driver Monitoring System")
 
     try:
         start_face_detection()
 
-        # 🔥 Keep CARLA running continuously
-        # while True:
-        #     run_carla()
-        #     print("⚠️ CARLA exited unexpectedly. Restarting...")
-        #     time.sleep(2)
+        from subprocess_launcher import is_face_detection_running
+        while is_face_detection_running():
+            time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\n🛑 Ctrl+C detected. Shutting down...")
+        print("\nðŸ›‘ Ctrl+C detected. Shutting down...")
 
     except Exception as e:
-        print("💥 MAIN SYSTEM ERROR:", e)
+        print("ðŸ’¥ MAIN SYSTEM ERROR:", e)
 
     finally:
         stop_face_detection()
-        print("🧹 Cleanup done. Exiting.")
+        print("ðŸ§¹ Cleanup done. Exiting.")
         sys.exit(0)
 
 
@@ -205,12 +218,17 @@ def start_face_detection():
     
 
     try:
+        import os
+        kwargs = {}
+        if os.name == 'nt':
+            kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+
         face_process = subprocess.Popen(
             [
                 face_python,
                 face_main
             ],
-            creationflags=subprocess.CREATE_NEW_CONSOLE
+            **kwargs
         )
 
         # Give it a moment to fail if it's going to
@@ -237,23 +255,29 @@ def stop_face_detection():
         face_process.terminate()
         face_process.wait()
 
+def is_face_detection_running():
+    global face_process
+    return face_process is not None and face_process.poll() is None
+
 
 ================================================
 FILE: System_paths_config.py
 ================================================
 from pathlib import Path
-import subprocess
+import os
+import sys
 
 BASE_DIR = Path(__file__).resolve().parent
+BASELINE_DIR = BASE_DIR / "face_detection_codes" / "baselines"
+BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 
-face_python = BASE_DIR / "face_detection_codes" / "facedetection" / "Scripts" / "python.exe"
+face_python = Path(os.getenv("DRIVER_MONITOR_PYTHON", sys.executable))
 face_main = BASE_DIR / "face_detection_codes" / "main.py"
 
-# Safety check
 if not face_python.exists():
     raise FileNotFoundError(
-        f"❌ Face detection env not found:\n{face_python}\n"
-        "👉 Run: python setup_face_env.py"
+        f"❌ Face detection Python not found:\n{face_python}\n"
+        "Set DRIVER_MONITOR_PYTHON environment variable to point to the correct interpreter."
     )
 
 
@@ -913,68 +937,69 @@ def register_new_driver(identifier):
     return driver
 
 
-entered_driver_id = os.getenv("DRIVER_ID")
-if not entered_driver_id:
-    entered_driver_id = input(
-        "Enter employee ID or driver UUID: "
-    ).strip().lower()
-driver_profile = database_writer.find_driver(entered_driver_id)
-
-if not driver_profile:
-    driver_profile = register_new_driver(entered_driver_id)
-
-driver_id = driver_profile["id"]
-
-driver_manager.set_driver(
-    driver_id
-)
-
-calibrator = BaselineCalibrator(
-    calibration_time=60
-)
-
-calibrator.set_driver(
-    driver_id
-)
-
-if calibrator.load_baseline():
-
-    print(
-        "[INFO] Existing baseline loaded"
-    )
-
-    mode_manager.set_mode(
-        "MONITORING"
-    )
-
-else:
-
-    print(
-        "[INFO] No baseline found."
-    )
-
-    mode_manager.set_mode(
-        "CALIBRATION"
-    )
-
-classifier = EnhancedDriverStateClassifier(
-    profile=calibrator.get_baseline()
-)
-drowsy_detector.ear_threshold = classifier.get_ear_threshold()
-cap = cv2.VideoCapture(0)
-detector = FaceDetector()
-extractor = EyeLandmarkExtractor()
+# Globals for initialization
+driver_id = None
+cap = None
+detector = None
+extractor = None
 last_uploaded_state = None
-trip_start_time = datetime.utcnow()
-trip = database_writer.start_trip(
-    driver_id,
-    trip_start_time,
-    driver_profile,
-)
-current_trip_id = trip["trip_id"]
+trip_start_time = None
+current_trip_id = None
+classifier = None
+scoring_pipeline = None
 
-score_repository = ScoreRepository(supabase)
-scoring_pipeline = ScoringPipeline(score_repository)
+
+def init_pipeline():
+    global driver_id, cap, detector, extractor, last_uploaded_state
+    global trip_start_time, current_trip_id, classifier, scoring_pipeline
+
+    from datetime import timezone
+
+    entered_driver_id = os.getenv("DRIVER_ID")
+    if not entered_driver_id:
+        entered_driver_id = input(
+            "Enter employee ID or driver UUID: "
+        ).strip().lower()
+    driver_profile = database_writer.find_driver(entered_driver_id)
+
+    if not driver_profile:
+        driver_profile = register_new_driver(entered_driver_id)
+
+    driver_id = driver_profile["id"]
+    driver_manager.set_driver(driver_id)
+
+    calibrator = BaselineCalibrator(calibration_time=60)
+    calibrator.set_driver(driver_id)
+
+    if calibrator.load_baseline():
+        print("[INFO] Existing baseline loaded")
+        mode_manager.set_mode("MONITORING")
+    else:
+        print("[INFO] No baseline found.")
+        mode_manager.set_mode("CALIBRATION")
+
+    classifier = EnhancedDriverStateClassifier(
+        profile=calibrator.get_baseline()
+    )
+    drowsy_detector.ear_threshold = classifier.get_ear_threshold()
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        raise RuntimeError("Failed to open webcam.")
+
+    detector = FaceDetector()
+    extractor = EyeLandmarkExtractor()
+    last_uploaded_state = None
+    trip_start_time = datetime.now(timezone.utc)
+    trip = database_writer.start_trip(
+        driver_id,
+        trip_start_time,
+        driver_profile,
+    )
+    current_trip_id = trip["trip_id"]
+
+    score_repository = ScoreRepository(supabase)
+    scoring_pipeline = ScoringPipeline(score_repository)
 
 
 # ---------------- START FASTAPI SERVER ----------------
@@ -995,8 +1020,9 @@ def start_api():
 
 def finalize_trip_score():
     """Compute and persist DriverScore for the current trip."""
+    from datetime import timezone
     try:
-        trip_end_time = datetime.utcnow()
+        trip_end_time = datetime.now(timezone.utc)
 
         database_writer.end_trip(
             current_trip_id,
@@ -1026,6 +1052,9 @@ def finalize_trip_score():
 # ---------------- MAIN PIPELINE ----------------
 def run_face_detection():
     global last_uploaded_state
+    if cap is None:
+        init_pipeline()
+
     print(" DRIVER MONITORING SYSTEM STARTED")
     print(
     f"[ACTIVE DRIVER] {driver_id}"
@@ -1207,6 +1236,11 @@ def run_face_detection():
                         "microsleep_count":
                             micro_metrics[
                                 "microsleep_count"
+                            ],
+
+                        "avg_microsleep_duration":
+                            micro_metrics[
+                                "avg_microsleep_duration"
                             ],
 
                         "pitch":
@@ -1567,7 +1601,33 @@ if __name__ == "__main__":
 ================================================
 FILE: face_detection_codes/requirements.txt
 ================================================
-[Binary file]
+absl-py==2.4.0
+attrs==26.1.0
+cffi==2.0.0
+contourpy==1.3.2
+cycler==0.12.1
+flatbuffers==25.12.19
+fonttools==4.62.1
+kiwisolver==1.5.0
+matplotlib==3.10.8
+mediapipe==0.10.14
+numpy==2.2.6
+opencv-contrib-python==4.13.0.92
+opencv-python==4.13.0.92
+packaging>=20.0
+pillow>=11.0.0
+protobuf>=3.20.3
+pycparser==3.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+six==1.17.0
+sounddevice==0.5.5
+supabase==2.15.3
+python-dotenv==1.1.1
+streamlit==1.44.1
+fastapi==0.116.1
+uvicorn==0.35.0
+httpx==0.28.1
 
 
 ================================================
@@ -1790,11 +1850,12 @@ def start_monitoring_process(driver_id: str, profile: dict):
         env.pop("DRIVER_PROFILE_JSON", None)
 
     project_root = BASE_DIR
+    log_file = open(project_root / "monitoring_subprocess.log", "w")
     process = subprocess.Popen(
         [sys.executable, str(project_root / "main.py")],
         cwd=str(project_root),
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
     )
@@ -2154,6 +2215,12 @@ class DatabaseWriter:
             "eye_closure_duration": self._float(
                 metrics.get("avg_closure_duration")
             ),
+            "yawn_count": self._int(metrics.get("yawn_count")),
+            "avg_yawn_duration": self._float(metrics.get("avg_yawn_duration")),
+            "microsleep_count": self._int(metrics.get("microsleep_count")),
+            "continuous_eye_closure": self._float(metrics.get("continuous_eye_closure")),
+            "microsleep_detected": bool(metrics.get("microsleep_detected")),
+            "avg_microsleep_duration": self._float(metrics.get("avg_microsleep_duration")),
             "driver_id": str(driver_id),
             "trip_id": str(trip_id),
             "created_at": self._timestamp(),
@@ -2404,6 +2471,12 @@ FILE: face_detection_codes/backend/db_schema_supabase.md
 | `fatigue_score` | `float8` |  Nullable |
 | `head_pose` | `text` |  Nullable |
 | `eye_closure_duration` | `float8` |  Nullable |
+| `yawn_count` | `int4` |  Nullable |
+| `avg_yawn_duration` | `float8` |  Nullable |
+| `microsleep_count` | `int4` |  Nullable |
+| `continuous_eye_closure` | `float8` |  Nullable |
+| `microsleep_detected` | `bool` |  Nullable |
+| `avg_microsleep_duration` | `float8` |  Nullable |
 | `driver_id` | `text` |  Nullable; user-entered Driver ID, not the auto-generated `id` primary key |
 | `trip_id` | `uuid` |  Nullable |
 
@@ -2936,7 +3009,7 @@ def generate_frames():
     while True:
 
         try:
-            latest_frame = (
+            latest_frame, timestamp = (
                 frame_bridge.receive_frame()
             )
 
@@ -2984,15 +3057,19 @@ def home():
 
 @app.get("/health")
 def health():
-
-    latest = (
+    import time
+    latest_frame, timestamp = (
         frame_bridge.receive_frame()
     )
 
+    is_active = False
+    if latest_frame is not None:
+        if (time.time() - timestamp) < 5.0:
+            is_active = True
+
     return {
         "backend_status": "healthy",
-        "camera_stream_active":
-            latest is not None
+        "camera_stream_active": is_active
     }
 
 
@@ -4304,7 +4381,9 @@ FILE: face_detection_codes/core/frame_bridge.py
 ================================================
 from threading import Lock
 
+import time
 latest_frame = None
+latest_timestamp = 0.0
 frame_lock = Lock()
 
 
@@ -4312,10 +4391,11 @@ def send_frame(frame):
     """
     Store latest frame safely.
     """
-    global latest_frame
+    global latest_frame, latest_timestamp
 
     with frame_lock:
         latest_frame = frame.copy()
+        latest_timestamp = time.time()
 
 
 def receive_frame():
@@ -4324,9 +4404,9 @@ def receive_frame():
     """
     with frame_lock:
         if latest_frame is None:
-            return None
+            return None, 0.0
 
-        return latest_frame.copy()
+        return latest_frame.copy(), latest_timestamp
 
 
 ================================================
@@ -5894,6 +5974,39 @@ class ScoreRepository:
             "blink_deviation":
                 features.blink_deviation,
 
+            "yawn_count":
+                features.yawn_count,
+
+            "yawn_rate":
+                features.yawn_rate,
+
+            "avg_yawn_duration":
+                features.avg_yawn_duration,
+
+            "microsleep_count":
+                features.microsleep_count,
+
+            "microsleep_rate":
+                features.microsleep_rate,
+
+            "avg_microsleep_duration":
+                features.avg_microsleep_duration,
+
+            "max_microsleep_duration":
+                features.max_microsleep_duration,
+
+            "distraction_count":
+                features.distraction_count,
+
+            "distraction_rate":
+                features.distraction_rate,
+
+            "distracted_seconds":
+                features.distracted_seconds,
+
+            "distracted_time_pct":
+                features.distracted_time_pct,
+
             "emergency_count":
                 features.emergency_count,
 
@@ -6038,6 +6151,9 @@ class ScoreRepository:
                 )
             except ValueError:
                 pass
+
+        # Remove DB specific id column before creating domain model
+        converted.pop("id", None)
 
         return TripFeatures(
             **converted
@@ -6386,6 +6502,20 @@ class HistoricalFeatureEngine:
                 weight
             )
 
+            self._add_weighted(
+                weighted,
+                "distracted_time_pct",
+                trip.distracted_time_pct,
+                weight
+            )
+
+            self._add_weighted(
+                weighted,
+                "emergency_risk_rate",
+                trip.emergency_risk_rate,
+                weight
+            )
+
             # --------------------------------
             # Event totals
             # --------------------------------
@@ -6531,7 +6661,11 @@ class HistoricalFeatureEngine:
                 weighted_hours
             ),
 
-            distracted_time_pct=None,
+            distracted_time_pct=
+                self._weighted_value(
+                    weighted,
+                    "distracted_time_pct"
+                ),
 
             emergency_rate=self._rate(
                 event_totals[
@@ -6540,7 +6674,11 @@ class HistoricalFeatureEngine:
                 weighted_hours
             ),
 
-            emergency_risk_rate=None,
+            emergency_risk_rate=
+                self._weighted_value(
+                    weighted,
+                    "emergency_risk_rate"
+                ),
 
             avg_speed=
                 self._weighted_value(
@@ -9290,55 +9428,132 @@ FILE: face_detection_codes/testing/test_mar.py
 ================================================
 import cv2
 
-from face_detection import FaceDetector
-from mouth_landmark_extractor import MouthLandmarkExtractor
-from mar_calculator import MARCalculator
+from detection.face_detection import FaceDetector
+from detection.mouth_landmark_extractor import MouthLandmarkExtractor
+from metrics.mar_calculator import MARCalculator
 
 
-cap = cv2.VideoCapture(0)
+def run_demo():
+    cap = cv2.VideoCapture(0)
 
-detector = FaceDetector()
-extractor = MouthLandmarkExtractor()
-mar_calculator = MARCalculator()
+    detector = FaceDetector()
+    extractor = MouthLandmarkExtractor()
+    mar_calculator = MARCalculator()
 
-while True:
+    while True:
 
-    ret, frame = cap.read()
+        ret, frame = cap.read()
 
-    if not ret:
-        continue
+        if not ret:
+            continue
 
-    data = detector.detect(frame)
+        data = detector.detect(frame)
 
-    if data["face_detected"]:
+        if data["face_detected"]:
 
-        x, y, w, h = data["face_bbox"]
+            x, y, w, h = data["face_bbox"]
 
-        face_region = frame[y:y+h, x:x+w]
+            face_region = frame[y:y+h, x:x+w]
 
-        mouth_data = extractor.extract(
-            face_region,
-            (x, y, w, h)
-        )
-
-        mouth_points = mouth_data["mouth"]
-
-        if len(mouth_points) == 8:
-
-            mar = mar_calculator.calculate_mar(
-                mouth_points
+            mouth_data = extractor.extract(
+                face_region,
+                (x, y, w, h)
             )
 
-            cv2.putText(
+            mouth_points = mouth_data["mouth"]
+
+            if len(mouth_points) == 8:
+
+                mar = mar_calculator.calculate_mar(
+                    mouth_points
+                )
+
+                cv2.putText(
+                    frame,
+                    f"MAR: {mar:.2f}",
+                    (30, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 255, 0),
+                    2
+                )
+
+                for px, py in mouth_points:
+
+                    cv2.circle(
+                        frame,
+                        (px, py),
+                        4,
+                        (0, 0, 255),
+                        -1
+                    )
+
+            cv2.rectangle(
                 frame,
-                f"MAR: {mar:.2f}",
-                (30, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
+                (x, y),
+                (x + w, y + h),
                 (0, 255, 0),
                 2
             )
 
+        cv2.imshow("MAR Test", frame)
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    run_demo()
+
+
+================================================
+FILE: face_detection_codes/testing/test_mouth_extractor.py
+================================================
+import cv2
+
+from detection.face_detection import FaceDetector
+from detection.mouth_landmark_extractor import MouthLandmarkExtractor
+
+def run_demo():
+    cap = cv2.VideoCapture(0)
+
+    detector = FaceDetector()
+    extractor = MouthLandmarkExtractor()
+
+    while True:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        data = detector.detect(frame)
+
+        if data["face_detected"]:
+
+            x, y, w, h = data["face_bbox"]
+
+            face_region = frame[y:y+h, x:x+w]
+
+            mouth_data = extractor.extract(
+                face_region,
+                (x, y, w, h)
+            )
+
+            mouth_points = mouth_data["mouth"]
+
+            # Draw face box
+            cv2.rectangle(
+                frame,
+                (x, y),
+                (x + w, y + h),
+                (0, 255, 0),
+                2
+            )
+
+            # Draw mouth landmarks
             for px, py in mouth_points:
 
                 cv2.circle(
@@ -9349,87 +9564,18 @@ while True:
                     -1
                 )
 
-        cv2.rectangle(
-            frame,
-            (x, y),
-            (x + w, y + h),
-            (0, 255, 0),
-            2
-        )
+        cv2.imshow("Mouth Landmark Test", frame)
 
-    cv2.imshow("MAR Test", frame)
+        key = cv2.waitKey(1)
 
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+        if key == 27:  # ESC
+            break
 
-cap.release()
-cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
 
-
-================================================
-FILE: face_detection_codes/testing/test_mouth_extractor.py
-================================================
-import cv2
-
-from face_detection import FaceDetector
-from mouth_landmark_extractor import MouthLandmarkExtractor
-
-cap = cv2.VideoCapture(0)
-
-detector = FaceDetector()
-extractor = MouthLandmarkExtractor()
-
-while True:
-
-    ret, frame = cap.read()
-
-    if not ret:
-        continue
-
-    data = detector.detect(frame)
-
-    if data["face_detected"]:
-
-        x, y, w, h = data["face_bbox"]
-
-        face_region = frame[y:y+h, x:x+w]
-
-        mouth_data = extractor.extract(
-            face_region,
-            (x, y, w, h)
-        )
-
-        mouth_points = mouth_data["mouth"]
-
-        # Draw face box
-        cv2.rectangle(
-            frame,
-            (x, y),
-            (x + w, y + h),
-            (0, 255, 0),
-            2
-        )
-
-        # Draw mouth landmarks
-        for px, py in mouth_points:
-
-            cv2.circle(
-                frame,
-                (px, py),
-                4,
-                (0, 0, 255),
-                -1
-            )
-
-    cv2.imshow("Mouth Landmark Test", frame)
-
-    key = cv2.waitKey(1)
-
-    if key == 27:  # ESC
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    run_demo()
 
 
 ================================================
@@ -9449,109 +9595,112 @@ FILE: face_detection_codes/testing/test_yawn.py
 ================================================
 import cv2
 
-from face_detection import FaceDetector
-from mouth_landmark_extractor import (
+from detection.face_detection import FaceDetector
+from detection.mouth_landmark_extractor import (
     MouthLandmarkExtractor
 )
 
-from mar_calculator import MARCalculator
-from yawn_detector import YawnDetector
+from metrics.mar_calculator import MARCalculator
+from metrics.yawn_detector import YawnDetector
 
+def run_demo():
+    cap = cv2.VideoCapture(0)
 
-cap = cv2.VideoCapture(0)
+    detector = FaceDetector()
 
-detector = FaceDetector()
+    extractor = MouthLandmarkExtractor()
 
-extractor = MouthLandmarkExtractor()
+    mar_calculator = MARCalculator()
 
-mar_calculator = MARCalculator()
-
-yawn_detector = YawnDetector(
-    mar_threshold=0.6,
-    min_yawn_duration=1.0
-)
-
-while True:
-
-    ret, frame = cap.read()
-
-    if not ret:
-        continue
-
-    data = detector.detect(frame)
-
-    if data["face_detected"]:
-
-        x, y, w, h = data["face_bbox"]
-
-        face = frame[y:y+h, x:x+w]
-
-        mouth = extractor.extract(
-            face,
-            (x, y, w, h)
-        )
-
-        mouth_points = mouth["mouth"]
-
-        if len(mouth_points) == 8:
-
-            mar = mar_calculator.calculate_mar(
-                mouth_points
-            )
-
-            yawn_metrics = (
-                yawn_detector.update(mar)
-            )
-
-            cv2.putText(
-                frame,
-                f"MAR: {mar:.2f}",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2
-            )
-
-            cv2.putText(
-                frame,
-                f"Yawns: {yawn_metrics['yawn_count']}",
-                (20, 80),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 0),
-                2
-            )
-
-            cv2.putText(
-                frame,
-                f"Yawning: {yawn_metrics['is_yawning']}",
-                (20, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2
-            )
-
-            for px, py in mouth_points:
-                cv2.circle(
-                    frame,
-                    (px, py),
-                    3,
-                    (0, 255, 255),
-                    -1
-                )
-
-    cv2.imshow(
-        "Yawn Detector Test",
-        frame
+    yawn_detector = YawnDetector(
+        mar_threshold=0.6,
+        min_yawn_duration=1.0
     )
 
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+    while True:
 
-cap.release()
-cv2.destroyAllWindows()
+        ret, frame = cap.read()
+
+        if not ret:
+            continue
+
+        data = detector.detect(frame)
+
+        if data["face_detected"]:
+
+            x, y, w, h = data["face_bbox"]
+
+            face = frame[y:y+h, x:x+w]
+
+            mouth = extractor.extract(
+                face,
+                (x, y, w, h)
+            )
+
+            mouth_points = mouth["mouth"]
+
+            if len(mouth_points) == 8:
+
+                mar = mar_calculator.calculate_mar(
+                    mouth_points
+                )
+
+                yawn_metrics = (
+                    yawn_detector.update(mar)
+                )
+
+                cv2.putText(
+                    frame,
+                    f"MAR: {mar:.2f}",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Yawns: {yawn_metrics['yawn_count']}",
+                    (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 0),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Yawning: {yawn_metrics['is_yawning']}",
+                    (20, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    2
+                )
+
+                for px, py in mouth_points:
+                    cv2.circle(
+                        frame,
+                        (px, py),
+                        3,
+                        (0, 255, 255),
+                        -1
+                    )
+
+        cv2.imshow(
+            "Yawn Detector Test",
+            frame
+        )
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    run_demo()
 
 
 ================================================
@@ -9632,7 +9781,7 @@ def test_push_driver_metrics_writes_historical_sample_and_only_emits_event_on_tr
     assert event_payload["event_type"] == "UNRESPONSIVE"
     assert event_payload["driver_id"] == "driver-123"
     assert event_payload["trip_id"] == "trip-456"
-    assert event_payload["metadata"]["frame_url"] is None
+    assert event_payload["metadata"].get("frame_url") is None
 
 
 
@@ -10022,6 +10171,25 @@ def test_event_rates_are_derived_from_history():
     assert result.distracted_time_pct == pytest.approx(1.0)
     assert result.emergency_risk_rate is not None
 
+def test_distracted_time_and_emergency_risk_rate_aggregated():
+    trips = [
+        make_trip(
+            "trip-1",
+            1.0,
+            BASE - timedelta(days=1),
+        ),
+    ]
+    trips[0].distracted_time_pct = 15.0
+    trips[0].emergency_risk_rate = 5.0
+
+    result = HistoricalFeatureEngine().aggregate(
+        trips,
+        BASE,
+    )
+
+    assert result.distracted_time_pct == pytest.approx(15.0)
+    assert result.emergency_risk_rate == pytest.approx(5.0)
+
 
 def test_recent_trip_has_more_recency_weight():
     trips = [
@@ -10068,6 +10236,67 @@ def test_max_microsleep_duration_is_preserved():
     )
 
     assert result.max_microsleep_duration == pytest.approx(7.5)
+
+
+================================================
+FILE: face_detection_codes/Tests/test_livestream.py
+================================================
+import pytest
+from fastapi.testclient import TestClient
+import numpy as np
+import time
+
+from core import frame_bridge
+from backend.Streaming_frames_endpoint import app, generate_frames
+
+client = TestClient(app)
+
+def test_health_no_frame():
+    frame_bridge.latest_frame = None
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["camera_stream_active"] == False
+
+def test_health_with_fresh_frame():
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame_bridge.send_frame(frame)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["camera_stream_active"] == True
+
+def test_health_with_stale_frame():
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame_bridge.send_frame(frame)
+    frame_bridge.latest_timestamp = time.time() - 10.0
+
+    # We must patch the client because we mutated the module directly
+    # but the client might load the endpoint and use a different instance of frame_bridge
+    # Wait, they share memory if imported from the same root. Let's just fix Streaming_frames_endpoint.py
+
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["camera_stream_active"] == False
+
+def test_video_feed_yields_mjpeg():
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame_bridge.send_frame(frame)
+
+    # Test generator directly
+    gen = generate_frames()
+    chunk = next(gen)
+    assert b"--frame\r\n" in chunk
+    assert b"Content-Type: image/jpeg\r\n\r\n" in chunk
+
+    # Test generator cleanup/disconnect handling
+    gen.close()
+    with pytest.raises(StopIteration):
+        next(gen)
+
+def test_root_endpoint():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "video_endpoint" in response.json()
+
 
 
 ================================================

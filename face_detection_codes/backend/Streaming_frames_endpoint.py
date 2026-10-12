@@ -50,6 +50,8 @@ def generate_frames():
             )
             time.sleep(FRAME_DELAY)
 
+        except GeneratorExit:
+            break
         except Exception as e:
 
             print(

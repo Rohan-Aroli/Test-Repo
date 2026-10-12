@@ -45,6 +45,10 @@ def upload_driver_frame(frame, driver_id=None, event_type=None):
             f"{int(current_time)}_"
             f"{uuid.uuid4().hex[:8]}.jpg"
         )
+        if not supabase or not hasattr(supabase, "storage"):
+            print("[FRAME UPLOAD] Supabase storage client not available. Skipping upload.")
+            return None
+
         bucket_name = "driver-feed"
 
         supabase.storage.from_(bucket_name).upload(
@@ -54,14 +58,16 @@ def upload_driver_frame(frame, driver_id=None, event_type=None):
         )
 
         public_url = supabase.storage.from_(bucket_name).get_public_url(filename)
-        last_uploaded_url = public_url
-        last_frame_upload = current_time
+        if public_url:
+            last_uploaded_url = public_url
+            last_frame_upload = current_time
 
-        if driver_id:
-            database_writer.update_latest_driver_frame(driver_id, public_url)
+            if driver_id:
+                database_writer.update_latest_driver_frame(driver_id, public_url)
 
-        print(f"[FRAME UPLOAD SUCCESS] {filename}")
-        return public_url
+            print(f"[FRAME UPLOAD SUCCESS] {filename}")
+            return public_url
+        return None
 
     except Exception as e:
         error_message = str(e)

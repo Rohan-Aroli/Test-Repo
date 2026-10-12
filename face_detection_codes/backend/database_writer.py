@@ -11,34 +11,40 @@ class DatabaseWriter:
         identifier = str(identifier).strip()
         if not identifier:
             return None
-
-        response = (
-            self.client
-            .table("drivers")
-            .select("*")
-            .eq("employee_id", identifier)
-            .limit(1)
-            .execute()
-        )
-
-        if response.data:
-            return response.data[0]
-
-        try:
-            UUID(identifier)
-        except ValueError:
+        if not self.client:
             return None
 
-        response = (
-            self.client
-            .table("drivers")
-            .select("*")
-            .eq("id", identifier)
-            .limit(1)
-            .execute()
-        )
+        try:
+            response = (
+                self.client
+                .table("drivers")
+                .select("*")
+                .eq("employee_id", identifier)
+                .limit(1)
+                .execute()
+            )
 
-        return response.data[0] if response.data else None
+            if response and getattr(response, "data", None):
+                return response.data[0]
+
+            try:
+                UUID(identifier)
+            except ValueError:
+                return None
+
+            response = (
+                self.client
+                .table("drivers")
+                .select("*")
+                .eq("id", identifier)
+                .limit(1)
+                .execute()
+            )
+
+            return response.data[0] if (response and getattr(response, "data", None)) else None
+        except Exception as e:
+            print(f"[DB WARNING] find_driver failed: {e}")
+            return None
 
     def register_driver(self, driver_id, profile):
         payload = {
@@ -57,15 +63,21 @@ class DatabaseWriter:
             "contact": profile.get("contact"),
             "fleet_id": profile.get("fleet_id"),
         }
+        if not self.client:
+            return payload
 
-        response = (
-            self.client
-            .table("drivers")
-            .insert(payload)
-            .execute()
-        )
+        try:
+            response = (
+                self.client
+                .table("drivers")
+                .insert(payload)
+                .execute()
+            )
 
-        return response.data[0] if response.data else payload
+            return response.data[0] if (response and getattr(response, "data", None)) else payload
+        except Exception as e:
+            print(f"[DB WARNING] register_driver failed: {e}")
+            return payload
 
     def start_trip(self, driver_id, start_time=None, details=None):
         details = details or {}
@@ -77,26 +89,39 @@ class DatabaseWriter:
             "destination": details.get("destination"),
             "route": details.get("route"),
         }
+        if not self.client:
+            return payload
 
-        response = (
-            self.client
-            .table("trips")
-            .insert(payload)
-            .execute()
-        )
+        try:
+            response = (
+                self.client
+                .table("trips")
+                .insert(payload)
+                .execute()
+            )
 
-        return response.data[0] if response.data else payload
+            return response.data[0] if (response and getattr(response, "data", None)) else payload
+        except Exception as e:
+            print(f"[DB WARNING] start_trip failed: {e}")
+            return payload
 
     def end_trip(self, trip_id, end_time=None):
-        response = (
-            self.client
-            .table("trips")
-            .update({"end_time": self._timestamp(end_time)})
-            .eq("trip_id", str(trip_id))
-            .execute()
-        )
+        if not self.client:
+            return None
 
-        return response.data[0] if response.data else None
+        try:
+            response = (
+                self.client
+                .table("trips")
+                .update({"end_time": self._timestamp(end_time)})
+                .eq("trip_id", str(trip_id))
+                .execute()
+            )
+
+            return response.data[0] if (response and getattr(response, "data", None)) else None
+        except Exception as e:
+            print(f"[DB WARNING] end_trip failed: {e}")
+            return None
 
     def write_driver_metrics(
         self,
@@ -133,12 +158,41 @@ class DatabaseWriter:
             "created_at": self._timestamp(),
         }
 
-        return (
-            self.client
-            .table("driver_metrics")
-            .insert(payload)
-            .execute()
-        )
+        if not self.client:
+            return None
+
+        try:
+            return (
+                self.client
+                .table("driver_metrics")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[DB WARNING] write_driver_metrics failed: {e}")
+            err_msg = str(e).lower()
+            if "column" in err_msg or "schema" in err_msg or "syntax" in err_msg or "type" in err_msg:
+                try:
+                    core_payload = {
+                        "ear": payload["ear"],
+                        "perclos": payload["perclos"],
+                        "blink_rate": payload["blink_rate"],
+                        "driver_state": payload["driver_state"],
+                        "fatigue_score": payload["fatigue_score"],
+                        "eye_closure_duration": payload["eye_closure_duration"],
+                        "driver_id": payload["driver_id"],
+                        "trip_id": payload["trip_id"],
+                        "created_at": payload["created_at"],
+                    }
+                    return (
+                        self.client
+                        .table("driver_metrics")
+                        .insert(core_payload)
+                        .execute()
+                    )
+                except Exception as inner_e:
+                    print(f"[DB WARNING] write_driver_metrics core fallback failed: {inner_e}")
+            return None
 
     def update_live_driver_state(
         self,
@@ -165,31 +219,38 @@ class DatabaseWriter:
         if frame_url is not None:
             payload["frame_url"] = frame_url
 
-        existing = (
-            self.client
-            .table("live_driver_state")
-            .select("id")
-            .eq("driver_id", str(driver_id))
-            .limit(1)
-            .execute()
-        )
+        if not self.client:
+            return None
 
-        if existing.data:
-            return (
+        try:
+            existing = (
                 self.client
                 .table("live_driver_state")
-                .update(payload)
+                .select("id")
                 .eq("driver_id", str(driver_id))
+                .limit(1)
                 .execute()
             )
 
-        payload["driver_id"] = str(driver_id)
-        return (
-            self.client
-            .table("live_driver_state")
-            .insert(payload)
-            .execute()
-        )
+            if existing and getattr(existing, "data", None):
+                return (
+                    self.client
+                    .table("live_driver_state")
+                    .update(payload)
+                    .eq("driver_id", str(driver_id))
+                    .execute()
+                )
+
+            payload["driver_id"] = str(driver_id)
+            return (
+                self.client
+                .table("live_driver_state")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[DB WARNING] update_live_driver_state failed: {e}")
+            return None
 
     def update_latest_driver_frame(self, driver_id, frame_url):
         payload = {
@@ -197,31 +258,37 @@ class DatabaseWriter:
             "updated_at": self._timestamp(),
             "driver_id": str(driver_id),
         }
+        if not self.client:
+            return None
 
-        existing = (
-            self.client
-            .table("latest_driver_frame")
-            .select("id")
-            .eq("driver_id", str(driver_id))
-            .limit(1)
-            .execute()
-        )
-
-        if existing.data:
-            return (
+        try:
+            existing = (
                 self.client
                 .table("latest_driver_frame")
-                .update(payload)
+                .select("id")
                 .eq("driver_id", str(driver_id))
+                .limit(1)
                 .execute()
             )
 
-        return (
-            self.client
-            .table("latest_driver_frame")
-            .insert(payload)
-            .execute()
-        )
+            if existing and getattr(existing, "data", None):
+                return (
+                    self.client
+                    .table("latest_driver_frame")
+                    .update(payload)
+                    .eq("driver_id", str(driver_id))
+                    .execute()
+                )
+
+            return (
+                self.client
+                .table("latest_driver_frame")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[DB WARNING] update_latest_driver_frame failed: {e}")
+            return None
 
     def write_frame(self, frame_url, driver_id):
         payload = {
@@ -229,16 +296,22 @@ class DatabaseWriter:
             "updated_at": self._timestamp(),
             "driver_id": str(driver_id),
         }
+        if not self.client:
+            return None
 
-        response = (
-            self.client
-            .table("driver_frames")
-            .insert(payload)
-            .execute()
-        )
+        try:
+            response = (
+                self.client
+                .table("driver_frames")
+                .insert(payload)
+                .execute()
+            )
 
-        self.update_latest_driver_frame(driver_id, frame_url)
-        return response
+            self.update_latest_driver_frame(driver_id, frame_url)
+            return response
+        except Exception as e:
+            print(f"[DB WARNING] write_frame failed: {e}")
+            return None
 
     def write_event(
         self,
@@ -265,12 +338,19 @@ class DatabaseWriter:
         if trip_id is not None:
             payload["trip_id"] = str(trip_id)
 
-        return (
-            self.client
-            .table("driver_events")
-            .insert(payload)
-            .execute()
-        )
+        if not self.client:
+            return None
+
+        try:
+            return (
+                self.client
+                .table("driver_events")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[DB WARNING] write_event failed: {e}")
+            return None
 
     def write_emergency_event(
         self,
@@ -295,12 +375,19 @@ class DatabaseWriter:
             "created_at": self._timestamp(),
         }
 
-        return (
-            self.client
-            .table("emergency_events")
-            .insert(payload)
-            .execute()
-        )
+        if not self.client:
+            return None
+
+        try:
+            return (
+                self.client
+                .table("emergency_events")
+                .insert(payload)
+                .execute()
+            )
+        except Exception as e:
+            print(f"[DB WARNING] write_emergency_event failed: {e}")
+            return None
 
     def save_driver_baseline(self, driver_id, baseline_payload):
         payload = {
@@ -315,27 +402,40 @@ class DatabaseWriter:
             ),
             "driver_id": str(driver_id),
         }
+        if not self.client:
+            return None
 
-        table = self.client.table("driver_metrics")
-        existing = table.select("id").eq("id", str(driver_id)).limit(1).execute()
-        if existing.data:
-            return table.update(payload).eq("id", str(driver_id)).execute()
-        return table.insert(payload).execute()
+        try:
+            table = self.client.table("driver_metrics")
+            existing = table.select("id").eq("id", str(driver_id)).limit(1).execute()
+            if existing and getattr(existing, "data", None):
+                return table.update(payload).eq("id", str(driver_id)).execute()
+            return table.insert(payload).execute()
+        except Exception as e:
+            print(f"[DB WARNING] save_driver_baseline failed: {e}")
+            return None
 
     def get_driver_baseline(self, driver_id):
-        response = (
-            self.client
-            .table("driver_metrics")
-            .select("*")
-            .eq("driver_id", str(driver_id))
-            .eq("driver_state", "NORMAL")
-            .is_("trip_id", "null")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
+        if not self.client:
+            return None
 
-        return response.data[0] if response.data else None
+        try:
+            response = (
+                self.client
+                .table("driver_metrics")
+                .select("*")
+                .eq("driver_id", str(driver_id))
+                .eq("driver_state", "NORMAL")
+                .is_("trip_id", "null")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+            return response.data[0] if (response and getattr(response, "data", None)) else None
+        except Exception as e:
+            print(f"[DB WARNING] get_driver_baseline failed: {e}")
+            return None
 
     @staticmethod
     def _timestamp(value=None):
