@@ -3,11 +3,18 @@ import time
 from pathlib import Path
 
 # Universal root path
-BASE_DIR = Path(__file__).resolve().parent.parent
+MODULE_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = MODULE_DIR.parent
 
-# Shared folder paths
-STATE_JSON_PATH = BASE_DIR / "shared" / "driver_state.json"
-SCORES_JSON_PATH = BASE_DIR / "shared" / "all_scores.json"
+# Shared folder paths - support both module-level and root-level shared folders
+STATE_JSON_PATHS = [
+    MODULE_DIR / "shared" / "driver_state.json",
+    ROOT_DIR / "shared" / "driver_state.json",
+]
+SCORES_JSON_PATHS = [
+    MODULE_DIR / "shared" / "all_scores.json",
+    ROOT_DIR / "shared" / "all_scores.json",
+]
 
 # Write timers
 last_state_write = 0
@@ -30,17 +37,16 @@ def write_state_periodically(data):
 
     last_state_write = current_time
 
-    STATE_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for state_path in STATE_JSON_PATHS:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(state_path, "w") as f:
+                json.dump(data, f, indent=4)
+                f.flush()
+        except Exception as e:
+            print(f"[STATE LOGGER ERROR for {state_path}]: {e}")
 
-    try:
-        with open(STATE_JSON_PATH, "w") as f:
-            json.dump(data, f, indent=4)
-            f.flush()
-
-        print(f"[STATE LOGGER] {data}")
-
-    except Exception as e:
-        print(f"[STATE LOGGER ERROR]: {e}")
+    print(f"[STATE LOGGER] {data}")
 
 
 # -----------------------------------
@@ -56,14 +62,13 @@ def write_scores_periodically(metrics):
 
     last_score_write = current_time
 
-    SCORES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for score_path in SCORES_JSON_PATHS:
+        try:
+            score_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(score_path, "w") as f:
+                json.dump(metrics, f, indent=4)
+                f.flush()
+        except Exception as e:
+            print(f"[SCORE LOGGER ERROR for {score_path}]: {e}")
 
-    try:
-        with open(SCORES_JSON_PATH, "w") as f:
-            json.dump(metrics, f, indent=4)
-            f.flush()
-
-        print(f"[SCORE LOGGER] {metrics}")
-
-    except Exception as e:
-        print(f"[SCORE LOGGER ERROR]: {e}")
+    print(f"[SCORE LOGGER] {metrics}")
