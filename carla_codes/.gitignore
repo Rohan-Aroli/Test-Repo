@@ -1,2 +1,5 @@
 __pycache__/
 carla_env/
+.env
+.env.*
+*.env

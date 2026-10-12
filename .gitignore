@@ -1,15 +1,26 @@
+# Environment files
+.env
+.env.*
+*.env
+
 # Python cache
 __pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
 
 # Virtual environments
 .venv/
-
+carla_env/
+facedetection/
+arduino/arduino/
 
 # Temp file
 tempCodeRunnerFile.py
 
-#json in shared folder
+# Runtime generated json in shared folders
 shared/driver_state.json
+shared/all_scores.json
 
 # Generated archive exceeds GitHub's file-size limit
 face_detection_codes.zip
