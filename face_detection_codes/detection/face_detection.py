@@ -7,6 +7,12 @@ import sys
 
 class FaceDetector:
     def __init__(self):
+        if not hasattr(mp, "solutions"):
+            version = getattr(mp, "__version__", "unknown")
+            raise RuntimeError(
+                "This project requires MediaPipe's legacy solutions API "
+                f"(mediapipe==0.10.9); installed version is {version}."
+            )
         self.mp_face = mp.solutions.face_detection
         self.detector = self.mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.6)
 

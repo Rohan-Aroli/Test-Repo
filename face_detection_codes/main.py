@@ -3,14 +3,18 @@ import cv2
 import json
 import os
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import uvicorn
 
 from backend.frame_uploader import upload_driver_frame
 from backend.database_writer import DatabaseWriter
-from backend.push_metrics import push_driver_metrics
+from backend.push_metrics import (
+    push_driver_metrics,
+    set_score_callback,
+)
 from backend.supabase_client import supabase
 from backend import Streaming_frames_endpoint as stream
 
@@ -37,7 +41,10 @@ from core.logger import (
 )
 
 from DriverScore.db_repository import ScoreRepository
-from DriverScore.models import TripContext
+from DriverScore.models import (
+    FinalizationResult,
+    TripContext,
+)
 from DriverScore.scoring_pipeline import ScoringPipeline
 
 
@@ -69,6 +76,15 @@ def set_dashboard_callback(callback):
 def dashboard_update(frame, metrics, driver_state):
     if dashboard_callback is not None:
         dashboard_callback(frame, metrics, driver_state)
+
+
+def publish_processed_frame(frame, metrics, driver_state):
+    """Send the annotated frame to both supported display transports."""
+    dashboard_update(frame, metrics, driver_state)
+    try:
+        frame_bridge.send_frame(frame)
+    except Exception as error:
+        print(f"[WARNING] Frame streaming failed: {error}")
 
 
 def request_stop():
@@ -167,20 +183,58 @@ classifier = EnhancedDriverStateClassifier(
     profile=calibrator.get_baseline()
 )
 drowsy_detector.ear_threshold = classifier.get_ear_threshold()
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+if not cap.isOpened():
+    raise RuntimeError("Unable to open camera device 0.")
+print(
+    f"[CAMERA] opened=True size="
+    f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+    f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+)
 detector = FaceDetector()
 extractor = EyeLandmarkExtractor()
 last_uploaded_state = None
-trip_start_time = datetime.utcnow()
-trip = database_writer.start_trip(
-    driver_id,
-    trip_start_time,
-    driver_profile,
-)
-current_trip_id = trip["trip_id"]
+trip_start_time = datetime.now(timezone.utc)
+trip_persistence_error = None
+try:
+    trip = database_writer.start_trip(
+        driver_id,
+        trip_start_time,
+        driver_profile,
+    )
+    current_trip_id = trip["trip_id"]
+    trip_persisted = True
+except Exception as error:
+    # Live camera monitoring can continue when Supabase trips INSERT is denied
+    # by RLS. Historical trip writes remain disabled for this session.
+    trip_persistence_error = error
+    print(f"[WARNING] Trip persistence unavailable: {error}")
+    current_trip_id = None
+    trip_persisted = False
 
 score_repository = ScoreRepository(supabase)
 scoring_pipeline = ScoringPipeline(score_repository)
+
+
+def persist_live_driver_score(event_driver_id, event_trip_id):
+    """Recalculate and persist the score immediately after a driver event."""
+    event_time = datetime.now(timezone.utc)
+    score = scoring_pipeline.process_trip(
+        TripContext(
+            trip_id=event_trip_id,
+            driver_id=event_driver_id,
+            trip_start=trip_start_time,
+            trip_end=event_time,
+        )
+    )
+    print(
+        "[LIVE DRIVER SCORE] "
+        f"raw={score.raw_driver_score} final={score.final_driver_score}"
+    )
+    return score
+
+
+set_score_callback(persist_live_driver_score)
 
 
 # ---------------- START FASTAPI SERVER ----------------
@@ -199,10 +253,44 @@ def start_api():
         print(f"[ERROR] API Server failed to start: {e}")
 
 
-def finalize_trip_score():
+def prepare_event_frame(raw_frame, state):
+    """Persist an evidence frame once per important state transition."""
+    global last_uploaded_state
+
+    event_url = None
+    if (
+        state in {"DROWSY", "UNRESPONSIVE"}
+        and state != last_uploaded_state
+    ):
+        event_url = upload_driver_frame(
+            raw_frame,
+            driver_id,
+            event_type=state,
+        )
+        if event_url:
+            print(f"[INCIDENT SNAPSHOT SAVED] state={state}")
+
+    last_uploaded_state = state
+    return event_url
+
+
+def finalize_trip_score() -> FinalizationResult:
     """Compute and persist DriverScore for the current trip."""
+    if current_trip_id is None or not globals().get("trip_persisted", True):
+        persistence_error = globals().get("trip_persistence_error")
+        reason = (
+            f"Trip was not persisted; {persistence_error}"
+            if persistence_error
+            else "Trip was not persisted; no trip ID was returned."
+        )
+        return FinalizationResult(
+            success=False,
+            score=None,
+            error=f"{reason} Driver score finalization skipped.",
+        )
+
     try:
-        trip_end_time = datetime.utcnow()
+        trip_end_time = datetime.now(timezone.utc)
 
         database_writer.end_trip(
             current_trip_id,
@@ -224,9 +312,19 @@ def finalize_trip_score():
             f"final={score.final_driver_score} "
             f"confidence={score.score_confidence}"
         )
+        return FinalizationResult(
+            success=True,
+            score=score,
+            error=None,
+        )
 
     except Exception as e:
         print(f"[DRIVER SCORE ERROR] {e}")
+        return FinalizationResult(
+            success=False,
+            score=None,
+            error=str(e),
+        )
 
 
 # ---------------- MAIN PIPELINE ----------------
@@ -238,27 +336,23 @@ def run_face_detection():
     )
     
 
+    frame_count = 0
+    last_frame_warning = 0.0
+
     while not stop_requested.is_set():
         try:
             ret, frame = cap.read()
 
             if not ret or frame is None:
-                print("[ERROR] Camera frame not received")
+                now = time.monotonic()
+                if now - last_frame_warning >= 1.0:
+                    print("[ERROR] Camera frame not received")
+                    last_frame_warning = now
                 continue
 
-            # --------------------------------------------
-            # CREATE CLEAN FRAME COPY FOR DASHBOARD STREAM
-            # --------------------------------------------
             raw_frame = frame.copy()
             frame_url = None
-
-            # --------------------------------------------
-            # SEND FRAME TO LOCAL FASTAPI STREAM
-            # --------------------------------------------
-            try:
-                frame_bridge.send_frame(raw_frame)
-            except Exception as e:
-                print(f"[WARNING] Frame streaming failed: {e}")
+            frame_count += 1
 
             # --------------------------------------------
             # FACE DETECTION
@@ -310,6 +404,14 @@ def run_face_detection():
                 except Exception as e:
                     print(f"[ERROR] Landmark extraction failed: {e}")
                     face_detected = False
+
+            if frame_count % 30 == 0:
+                print(
+                    "[PIPELINE] "
+                    f"frames={frame_count} face_detected={face_detected} "
+                    f"left_landmarks={len(landmarks['left_eye'])} "
+                    f"right_landmarks={len(landmarks['right_eye'])}"
+                )
 
             # --------------------------------------------
             # CLASSIFICATION PIPELINE
@@ -470,23 +572,7 @@ def run_face_detection():
                     # --------------------------------------------
                     metrics["driver_id"] = driver_id
 
-                    if (
-                        driver_state == "UNRESPONSIVE"
-                        and last_uploaded_state != "UNRESPONSIVE"
-                    ):
-                        frame_url = upload_driver_frame(
-                            raw_frame,
-                            driver_id,
-                        )
-
-                        print(
-                            "[INCIDENT SNAPSHOT SAVED]"
-                        )
-
-                    last_uploaded_state = driver_state
-
-
-
+                    frame_url = prepare_event_frame(raw_frame, driver_state)
                     # --------------------------------------------
                     # PUSH METRICS + FRAME URL
                     # --------------------------------------------
@@ -534,9 +620,7 @@ def run_face_detection():
                         "roll": 0
                     }
                     driver_state = classifier.classify(metrics)
-
-                    #frame_url = upload_driver_frame(raw_frame)
-
+                    frame_url = prepare_event_frame(raw_frame, driver_state)
 
                     push_driver_metrics(
                         metrics,
@@ -583,8 +667,7 @@ def run_face_detection():
                     }
 
                     driver_state = classifier.classify(metrics)
-
-                    #frame_url = upload_driver_frame(raw_frame)
+                    frame_url = prepare_event_frame(raw_frame, driver_state)
 
                     push_driver_metrics(
                         metrics,
@@ -616,6 +699,10 @@ def run_face_detection():
             # --------------------------------------------
             # LOCAL DEBUG WINDOW
             # --------------------------------------------
+            # Publish the processed frame so Streamlit and the HTTP endpoint
+            # receive the same annotated image.
+            publish_processed_frame(frame, metrics, driver_state)
+
             if os.getenv("DASHBOARD_MODE") == "1":
                 continue
 
@@ -736,11 +823,12 @@ def run_face_detection():
                     2
                 )
 
-            cv2.imshow("Driver Monitoring System", frame)
+            if os.getenv("DASHBOARD_MODE") != "1":
+                cv2.imshow("Driver Monitoring System", frame)
 
-            if cv2.waitKey(1) & 0xFF == 27:
-                print("[INFO] Exiting system...")
-                break
+                if cv2.waitKey(1) & 0xFF == 27:
+                    print("[INFO] Exiting system...")
+                    break
 
         except Exception as e:
             print(f"[CRITICAL ERROR] Main loop failure: {e}")
@@ -748,7 +836,12 @@ def run_face_detection():
 
     cap.release()
     cv2.destroyAllWindows()
-    finalize_trip_score()
+    result = finalize_trip_score()
+    if not result.success:
+        print(
+            "[DRIVER SCORE] Finalization failed: "
+            f"{result.error or 'unknown error'}"
+        )
 
 
 # ---------------- ENTRY POINT ----------------
@@ -763,7 +856,12 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("[INFO] System stopped manually")
-        finalize_trip_score()
+        result = finalize_trip_score()
+        if not result.success:
+            print(
+                "[DRIVER SCORE] Finalization failed: "
+                f"{result.error or 'unknown error'}"
+            )
 
     except Exception as e:
         print(f"[CRITICAL ERROR] System startup failed: {e}")

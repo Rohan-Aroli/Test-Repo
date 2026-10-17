@@ -5,27 +5,25 @@ import uuid
 from backend.database_writer import DatabaseWriter
 from backend.supabase_client import supabase
 
-last_frame_upload = 0
-UPLOAD_INTERVAL = 1.0  # seconds
-last_uploaded_url = None
+last_frame_uploads = {}
+UPLOAD_INTERVAL = 1.0  # seconds per driver/event type
 database_writer = DatabaseWriter(supabase)
 
 
 def upload_driver_frame(frame, driver_id=None, event_type=None):
-    """Upload an important event frame to Supabase Storage only.
+    """Upload and register one important event frame.
 
     The live dashboard stream stays in memory and never goes through Supabase.
-    This helper is intentionally limited to single evidence-frame uploads when a
-    significant state transition occurs.
+    Callers invoke this only on significant state transitions.
     """
 
-    global last_frame_upload
-    global last_uploaded_url
-
     current_time = time.time()
+    upload_key = (str(driver_id or "unknown"), str(event_type or "driver_event"))
 
-    if current_time - last_frame_upload < UPLOAD_INTERVAL and last_uploaded_url:
-        return last_uploaded_url
+    if (
+        current_time - last_frame_uploads.get(upload_key, 0) < UPLOAD_INTERVAL
+    ):
+        return None
 
     try:
         success, buffer = cv2.imencode(
@@ -54,11 +52,10 @@ def upload_driver_frame(frame, driver_id=None, event_type=None):
         )
 
         public_url = supabase.storage.from_(bucket_name).get_public_url(filename)
-        last_uploaded_url = public_url
-        last_frame_upload = current_time
+        last_frame_uploads[upload_key] = current_time
 
         if driver_id:
-            database_writer.update_latest_driver_frame(driver_id, public_url)
+            database_writer.write_frame(public_url, driver_id)
 
         print(f"[FRAME UPLOAD SUCCESS] {filename}")
         return public_url

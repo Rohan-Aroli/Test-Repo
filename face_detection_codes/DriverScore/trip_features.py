@@ -1,5 +1,5 @@
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .models import TripContext, TripFeatures
 
@@ -40,55 +40,62 @@ class TripFeatureExtractor:
         Convert raw trip data into temporal trip-level features.
         """
 
-        self._validate_context(context)
+        normalized_context = TripContext(
+            trip_id=context.trip_id,
+            driver_id=context.driver_id,
+            trip_start=self._as_utc(context.trip_start),
+            trip_end=self._as_utc(context.trip_end),
+        )
+
+        self._validate_context(normalized_context)
 
         driver_metrics = self._sort_and_filter(
             driver_metrics,
-            context
+            normalized_context
         )
 
         vehicle_metrics = self._sort_and_filter(
             vehicle_metrics,
-            context
+            normalized_context
         )
 
         emergency_events = self._sort_and_filter(
             emergency_events,
-            context
+            normalized_context
         )
 
         driver_features = self._extract_driver_features(
-            context,
+            normalized_context,
             driver_metrics,
             baseline
         )
 
         vehicle_features = self._extract_vehicle_features(
-            context,
+            normalized_context,
             vehicle_metrics
         )
 
         emergency_features = self._extract_emergency_features(
-            context,
+            normalized_context,
             emergency_events
         )
 
         event_features = self._extract_event_features(
-            context,
+            normalized_context,
             driver_metrics
         )
 
         return TripFeatures(
-            trip_id=context.trip_id,
-            driver_id=context.driver_id,
+            trip_id=normalized_context.trip_id,
+            driver_id=normalized_context.driver_id,
 
             # Important:
             # HistoricalFeatureEngine uses this timestamp
             # for recency weighting.
-            calculated_at=context.trip_end,
+            calculated_at=normalized_context.trip_end,
 
-            duration_seconds=context.duration_seconds,
-            duration_hours=context.duration_hours,
+            duration_seconds=normalized_context.duration_seconds,
+            duration_hours=normalized_context.duration_hours,
 
             **driver_features,
             **vehicle_features,
@@ -97,12 +104,12 @@ class TripFeatureExtractor:
 
             driver_data_coverage=self._calculate_coverage(
                 len(driver_metrics),
-                context.duration_seconds
+                normalized_context.duration_seconds
             ),
 
             vehicle_data_coverage=self._calculate_coverage(
                 len(vehicle_metrics),
-                context.duration_seconds
+                normalized_context.duration_seconds
             )
         )
 
@@ -159,17 +166,26 @@ class TripFeatureExtractor:
     @staticmethod
     def _to_datetime(value):
         if isinstance(value, datetime):
-            return value
+            return TripFeatureExtractor._as_utc(value)
 
         if isinstance(value, str):
             try:
-                return datetime.fromisoformat(
+                parsed = datetime.fromisoformat(
                     value.replace("Z", "+00:00")
                 )
+                return TripFeatureExtractor._as_utc(parsed)
             except ValueError:
                 return None
 
         return None
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        """Interpret naive values as UTC and normalize aware values to UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+
+        return value.astimezone(timezone.utc)
 
     # ==================================================
     # DRIVER FEATURES

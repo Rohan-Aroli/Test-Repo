@@ -1,8 +1,29 @@
+# Python caches and compiled files
 __pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.venv*/
 facedetection/
-/face_detection_codes.zip
+
+# Local secrets and tool configuration
 .env
+.env.*
 opencode.json
-.venv
-.venv312
-baselines
+
+# Archives and temporary files
+*.zip
+tempCodeRunnerFile.py
+*.log
+
+# Local calibration and generated data
+baselines/
+
+
+# Coverage output
+.coverage
+.coverage.*
+htmlcov/

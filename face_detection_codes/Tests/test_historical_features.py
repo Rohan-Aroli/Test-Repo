@@ -19,6 +19,8 @@ def make_trip(
     drowsy_episode_count=1,
     unresponsive_episode_count=0,
     distraction_count=2,
+    distracted_time_pct=1.0,
+    emergency_risk_rate=2.0,
 ):
     return TripFeatures(
         trip_id=trip_id,
@@ -51,10 +53,10 @@ def make_trip(
         distraction_count=distraction_count,
         distraction_rate=distraction_count / duration_hours,
         distracted_seconds=20.0,
-        distracted_time_pct=1.0,
+        distracted_time_pct=distracted_time_pct,
         emergency_count=1,
         emergency_rate=1 / duration_hours,
-        emergency_risk_rate=2 / duration_hours,
+        emergency_risk_rate=emergency_risk_rate,
         avg_speed=50.0,
         max_speed=70.0,
         avg_throttle=20.0,
@@ -85,6 +87,36 @@ def test_historical_engine_uses_calculated_at():
     assert result.trips_analyzed == 1
     assert result.driving_hours_analyzed == pytest.approx(1.0)
     assert result.avg_perclos == pytest.approx(0.10)
+
+
+def test_historical_engine_normalizes_iso_calculated_at():
+    trip = make_trip(
+        "trip-1",
+        1.0,
+        "2026-08-20T10:00:00Z",
+    )
+
+    result = HistoricalFeatureEngine().aggregate(
+        [trip],
+        datetime(2026, 8, 21, 10, 0, 0),
+    )
+
+    assert result.trips_analyzed == 1
+
+
+def test_historical_engine_normalizes_fractional_second_timestamp():
+    trip = make_trip(
+        "trip-1",
+        1.0,
+        "2026-10-16T07:52:32.98796+00:00",
+    )
+
+    result = HistoricalFeatureEngine().aggregate(
+        [trip],
+        datetime(2026, 10, 17, 7, 52, 32, tzinfo=None),
+    )
+
+    assert result.trips_analyzed == 1
 
 
 def test_event_rates_are_derived_from_history():
@@ -119,6 +151,88 @@ def test_event_rates_are_derived_from_history():
     assert result.drowsy_episode_rate > 0
     assert result.distracted_time_pct == pytest.approx(1.0)
     assert result.emergency_risk_rate is not None
+
+
+def test_distracted_time_pct_is_preserved_for_one_trip():
+    trip = make_trip(
+        "trip-1",
+        1.0,
+        BASE - timedelta(days=1),
+        distracted_time_pct=3.5,
+    )
+
+    result = HistoricalFeatureEngine().aggregate([trip], BASE)
+
+    assert result.distracted_time_pct == pytest.approx(3.5)
+
+
+def test_distracted_time_pct_is_duration_weighted_across_trips():
+    trips = [
+        make_trip(
+            "short",
+            1.0,
+            BASE,
+            distracted_time_pct=2.0,
+        ),
+        make_trip(
+            "long",
+            3.0,
+            BASE,
+            distracted_time_pct=6.0,
+        ),
+    ]
+
+    result = HistoricalFeatureEngine(
+        recency_lambda=0.0
+    ).aggregate(trips, BASE)
+
+    assert result.distracted_time_pct == pytest.approx(5.0)
+
+
+def test_distracted_time_pct_is_none_when_all_values_are_null():
+    trips = [
+        make_trip(
+            "trip-1",
+            1.0,
+            BASE,
+            distracted_time_pct=None,
+        ),
+        make_trip(
+            "trip-2",
+            2.0,
+            BASE,
+            distracted_time_pct=None,
+        ),
+    ]
+
+    result = HistoricalFeatureEngine(
+        recency_lambda=0.0
+    ).aggregate(trips, BASE)
+
+    assert result.distracted_time_pct is None
+
+
+def test_distracted_time_pct_ignores_null_values_when_mixed():
+    trips = [
+        make_trip(
+            "null-trip",
+            1.0,
+            BASE,
+            distracted_time_pct=None,
+        ),
+        make_trip(
+            "value-trip",
+            3.0,
+            BASE,
+            distracted_time_pct=4.0,
+        ),
+    ]
+
+    result = HistoricalFeatureEngine(
+        recency_lambda=0.0
+    ).aggregate(trips, BASE)
+
+    assert result.distracted_time_pct == pytest.approx(4.0)
 
 
 def test_recent_trip_has_more_recency_weight():

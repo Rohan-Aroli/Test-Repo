@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from .trip_features import TripFeatureExtractor
 from .historical_features import HistoricalFeatureEngine
 from .component_scores import ComponentScorer
@@ -97,15 +99,7 @@ class ScoringPipeline:
         )
 
         # -------------------------------
-        # 4. Save trip features
-        # -------------------------------
-
-        self.repository.save_trip_features(
-            trip_features
-        )
-
-        # -------------------------------
-        # 5. Fetch historical trips
+        # 4. Fetch historical trips before saving the current trip
         # -------------------------------
 
         previous_trips = (
@@ -114,15 +108,35 @@ class ScoringPipeline:
                 trip_context.driver_id
             )
         )
+        previous_trips = [
+            trip
+            for trip in previous_trips
+            if trip.trip_id != trip_context.trip_id
+        ]
+
+        # -------------------------------
+        # 5. Save current trip features
+        # -------------------------------
+
+        self.repository.save_trip_features(
+            trip_features
+        )
+
+        # -------------------------------
+        # 6. Aggregate current and historical trips separately
+        # -------------------------------
+
+        current_historical = (
+            self.history_engine.aggregate(
+                trips=[trip_features],
+                reference_time=trip_context.trip_end
+            )
+        )
 
         all_trips = (
             previous_trips +
             [trip_features]
         )
-
-        # -------------------------------
-        # 6. Historical aggregation
-        # -------------------------------
 
         historical = (
             self.history_engine.aggregate(
@@ -132,44 +146,59 @@ class ScoringPipeline:
             )
         )
 
-        # -------------------------------
-        # 7. Normalize
-        # -------------------------------
+        current_normalized = (
+            self.component_scorer.normalize(
+                current_historical
+            )
+        )
 
-        normalized = (
+        historical_normalized = (
             self.component_scorer.normalize(
                 historical
             )
         )
 
-        # -------------------------------
-        # 8. Components
-        # -------------------------------
-
-        fatigue = (
+        current_fatigue = (
             self.component_scorer
             .fatigue_score(
-                normalized
+                current_normalized
             )
         )
 
-        attention = (
+        current_attention = (
             self.component_scorer
             .attention_score(
-                normalized
+                current_normalized
             )
         )
 
-        safety = (
+        current_safety = (
             self.component_scorer
             .safety_score(
-                normalized
+                current_normalized
             )
         )
 
-        # -------------------------------
-        # 9. Profile scores
-        # -------------------------------
+        historical_fatigue = (
+            self.component_scorer
+            .fatigue_score(
+                historical_normalized
+            )
+        )
+
+        historical_attention = (
+            self.component_scorer
+            .attention_score(
+                historical_normalized
+            )
+        )
+
+        historical_safety = (
+            self.component_scorer
+            .safety_score(
+                historical_normalized
+            )
+        )
 
         profile = (
             self.repository
@@ -186,44 +215,64 @@ class ScoringPipeline:
             "health_score"
         )
 
-        # -------------------------------
-        # 10. Critical events
-        # -------------------------------
-
-        critical_events = (
+        historical_critical_events = (
             self.repository
             .count_recent_critical_events(
                 trip_context.driver_id
             )
         )
 
-        # -------------------------------
-        # 11. Final score
-        # -------------------------------
+        current_critical_events = sum(
+            1
+            for event in emergency_events
+            if event.get("severity") == "critical"
+        )
 
-        score = self.score_engine.calculate(
+        current_score = self.score_engine.calculate(
             driver_id=
                 trip_context.driver_id,
 
-            fatigue_score=fatigue,
-            safety_score=safety,
-            attention_score=attention,
+            fatigue_score=current_fatigue,
+            safety_score=current_safety,
+            attention_score=current_attention,
 
             experience_score=experience,
             health_score=health,
 
-            historical_features=historical,
+            historical_features=current_historical,
 
-            critical_events=critical_events,
+            critical_events=current_critical_events,
 
             data_quality=self._data_quality(
                 trip_features
             )
         )
 
-        # -------------------------------
-        # 12. Save score
-        # -------------------------------
+        cumulative_score = self.score_engine.calculate(
+            driver_id=trip_context.driver_id,
+            fatigue_score=historical_fatigue,
+            safety_score=historical_safety,
+            attention_score=historical_attention,
+            experience_score=experience,
+            health_score=health,
+            historical_features=historical,
+            critical_events=historical_critical_events,
+            data_quality=self._data_quality(trip_features),
+        )
+
+        # The raw score describes this trip. The final score describes the
+        # driver's complete trip history, including historical constraints.
+        score = replace(
+            current_score,
+            final_driver_score=cumulative_score.final_driver_score,
+            critical_event=cumulative_score.critical_event,
+            score_cap=cumulative_score.score_cap,
+            trips_analyzed=cumulative_score.trips_analyzed,
+            driving_hours_analyzed=(
+                cumulative_score.driving_hours_analyzed
+            ),
+            score_confidence=cumulative_score.score_confidence,
+        )
 
         self.repository.save_score_history(
             score,

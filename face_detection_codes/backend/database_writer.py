@@ -1,11 +1,31 @@
 from datetime import datetime, timezone
+from time import sleep
 from uuid import UUID, uuid4
+
+import httpx
+
+
+class DatabaseUnavailableError(RuntimeError):
+    """Raised when a database request cannot reach Supabase."""
 
 
 class DatabaseWriter:
+    _MAX_REQUEST_ATTEMPTS = 3
 
     def __init__(self, client):
         self.client = client
+
+    def _execute_with_retry(self, request):
+        for attempt in range(self._MAX_REQUEST_ATTEMPTS):
+            try:
+                return request.execute()
+            except httpx.RequestError as exc:
+                if attempt == self._MAX_REQUEST_ATTEMPTS - 1:
+                    raise DatabaseUnavailableError(
+                        "Supabase could not be reached after "
+                        f"{self._MAX_REQUEST_ATTEMPTS} attempts."
+                    ) from exc
+                sleep(0.25 * (2**attempt))
 
     def find_driver(self, identifier):
         identifier = str(identifier).strip()
@@ -18,8 +38,8 @@ class DatabaseWriter:
             .select("*")
             .eq("employee_id", identifier)
             .limit(1)
-            .execute()
         )
+        response = self._execute_with_retry(response)
 
         if response.data:
             return response.data[0]
@@ -35,8 +55,8 @@ class DatabaseWriter:
             .select("*")
             .eq("id", identifier)
             .limit(1)
-            .execute()
         )
+        response = self._execute_with_retry(response)
 
         return response.data[0] if response.data else None
 
@@ -111,7 +131,6 @@ class DatabaseWriter:
         writes only current state and important events to Supabase.
         """
         payload = {
-            "id": f"{driver_id}:{uuid4()}",
             "ear": self._float(metrics.get("ear")),
             "perclos": self._float(metrics.get("perclos")),
             "blink_rate": self._int(metrics.get("blink_rate")),
@@ -122,7 +141,7 @@ class DatabaseWriter:
             "eye_closure_duration": self._float(
                 metrics.get("avg_closure_duration")
             ),
-            "driver_id": str(driver_id),
+            "driver_uuid": str(driver_id),
             "trip_id": str(trip_id),
             "created_at": self._timestamp(),
         }

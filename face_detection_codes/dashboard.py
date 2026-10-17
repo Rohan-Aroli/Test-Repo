@@ -133,16 +133,23 @@ class Dashboard:
 def start():
     root = tk.Tk()
     root.withdraw()
-    driver_id = tk.simpledialog.askstring("Driver", "Employee ID or driver UUID:")
+    driver_id = os.getenv("DRIVER_ID") or tk.simpledialog.askstring(
+        "Driver",
+        "Employee ID or driver UUID:",
+    )
     if not driver_id:
         messagebox.showwarning("Driver required", "Enter a driver ID to start monitoring.")
         root.destroy()
         return
-    driver_name = tk.simpledialog.askstring(
-        "Driver registration",
-        "If this is a new driver, enter their name.\nLeave blank for an existing driver.",
-        parent=root,
-    )
+    profile_json = os.getenv("DRIVER_PROFILE_JSON")
+    profile = json.loads(profile_json) if profile_json else {}
+    driver_name = profile.get("name")
+    if not driver_name and not profile_json:
+        driver_name = tk.simpledialog.askstring(
+            "Driver registration",
+            "If this is a new driver, enter their name.\nLeave blank for an existing driver.",
+            parent=root,
+        )
     if driver_name:
         os.environ["DRIVER_PROFILE_JSON"] = json.dumps({"name": driver_name.strip()})
     os.environ["DRIVER_ID"] = driver_id.strip().lower()

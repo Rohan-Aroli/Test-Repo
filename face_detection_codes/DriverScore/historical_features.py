@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timezone
 from typing import Optional
 
 from .models import TripFeatures, HistoricalFeatures
@@ -27,6 +28,7 @@ class HistoricalFeatureEngine:
                 "At least one trip is required"
             )
 
+        reference_time = self._normalize_time(reference_time)
         driver_id = trips[-1].driver_id
 
         weighted_hours = 0.0
@@ -96,6 +98,20 @@ class HistoricalFeatureEngine:
                 weighted,
                 "unresponsive_time_pct",
                 trip.unresponsive_time_pct,
+                weight
+            )
+
+            self._add_weighted(
+                weighted,
+                "distracted_time_pct",
+                trip.distracted_time_pct,
+                weight
+            )
+
+            self._add_weighted(
+                weighted,
+                "emergency_risk_rate",
+                trip.emergency_risk_rate,
                 weight
             )
 
@@ -293,7 +309,10 @@ class HistoricalFeatureEngine:
                 weighted_hours
             ),
 
-            distracted_time_pct=None,
+            distracted_time_pct=self._weighted_value(
+                weighted,
+                "distracted_time_pct"
+            ),
 
             emergency_rate=self._rate(
                 event_totals[
@@ -302,7 +321,10 @@ class HistoricalFeatureEngine:
                 weighted_hours
             ),
 
-            emergency_risk_rate=None,
+            emergency_risk_rate=self._weighted_value(
+                weighted,
+                "emergency_risk_rate"
+            ),
 
             avg_speed=
                 self._weighted_value(
@@ -341,15 +363,30 @@ class HistoricalFeatureEngine:
 
     @staticmethod
     def _trip_time(trip):
-
-        # Temporary convention:
-        # trip objects should later carry
-        # their calculated_at timestamp.
-        return getattr(
-            trip,
-            "calculated_at",
-            None
+        return HistoricalFeatureEngine._normalize_time(
+            getattr(
+                trip,
+                "calculated_at",
+                None
+            )
         )
+
+    @staticmethod
+    def _normalize_time(value):
+        if isinstance(value, str):
+            normalized = value.replace("Z", "+00:00")
+            try:
+                value = datetime.fromisoformat(normalized)
+            except ValueError:
+                value = datetime.strptime(
+                    normalized,
+                    "%Y-%m-%dT%H:%M:%S.%f%z"
+                )
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        return value
 
     @staticmethod
     def _add_weighted(

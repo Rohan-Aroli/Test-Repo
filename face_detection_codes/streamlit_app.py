@@ -1,8 +1,8 @@
 import json
 import os
+import queue
 import re
-import subprocess
-import sys
+import threading
 import time
 from datetime import time as clock_time
 from pathlib import Path
@@ -11,7 +11,7 @@ from uuid import uuid4
 import cv2
 import streamlit as st
 
-from backend.database_writer import DatabaseWriter
+from backend.database_writer import DatabaseUnavailableError, DatabaseWriter
 from backend.supabase_client import supabase
 from detection.eye_landmark_extractor import EyeLandmarkExtractor
 from detection.face_detection import FaceDetector
@@ -218,35 +218,70 @@ def register_driver(driver_id: str, profile: dict, baseline_summary: dict):
     return driver
 
 
-def start_monitoring_process(driver_id: str, profile: dict):
-    env = os.environ.copy()
-    env["DRIVER_ID"] = driver_id
-    if profile:
-        env["DRIVER_PROFILE_JSON"] = json.dumps(profile)
-    else:
-        env.pop("DRIVER_PROFILE_JSON", None)
+class MonitoringSession:
+    """Run the detector in a worker while Streamlit renders its latest frame."""
 
-    project_root = BASE_DIR
-    process = subprocess.Popen(
-        [sys.executable, str(project_root / "main.py")],
-        cwd=str(project_root),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return process
+    def __init__(self, driver_id: str, profile: dict):
+        self.driver_id = driver_id
+        self.profile = profile
+        self.events = queue.Queue(maxsize=2)
+        self.error = None
+        self.thread = threading.Thread(
+            target=self._run,
+            name="streamlit-driver-monitor",
+            daemon=True,
+        )
 
+    def start(self):
+        self.thread.start()
+        return self
 
-def stop_monitoring_process(process):
-    if process is not None:
+    def _publish(self, frame, metrics, state):
+        event = (frame.copy(), dict(metrics), state)
         try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
+            self.events.put_nowait(event)
+        except queue.Full:
             try:
-                process.kill()
-            except Exception:
+                self.events.get_nowait()
+            except queue.Empty:
                 pass
+            self.events.put_nowait(event)
+
+    def _run(self):
+        os.environ["DRIVER_ID"] = self.driver_id
+        os.environ["DRIVER_PROFILE_JSON"] = json.dumps(self.profile)
+        os.environ["DASHBOARD_MODE"] = "1"
+        try:
+            import main
+
+            main.stop_requested.clear()
+            main.set_dashboard_callback(self._publish)
+            threading.Thread(target=main.start_api, daemon=True).start()
+            main.run_face_detection()
+        except Exception as error:
+            self.error = error
+
+    def latest(self):
+        event = None
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                return event
+
+    def stop(self):
+        try:
+            import main
+
+            main.request_stop()
+        except ImportError:
+            pass
+        self.thread.join(timeout=5)
+
+
+def stop_monitoring_process(session):
+    if session is not None:
+        session.stop()
 
 
 def keep_plate_format(widget_key):
@@ -262,7 +297,7 @@ def render_landing_page():
     with registration_column:
         st.subheader("New driver registration")
         st.write("Create a driver profile, collect a baseline, and continue to monitoring.")
-        if st.button("Register a new driver", type="primary", use_container_width=True):
+        if st.button("Register a new driver", type="primary", width="stretch"):
             st.session_state["page"] = "register"
             st.session_state["driver_id"] = ""
             st.session_state["baseline_summary"] = None
@@ -271,7 +306,7 @@ def render_landing_page():
     with monitoring_column:
         st.subheader("Start monitoring")
         st.write("Select an existing driver and start the live monitoring pipeline.")
-        if st.button("Monitor an existing driver", use_container_width=True):
+        if st.button("Monitor an existing driver", width="stretch"):
             st.session_state["page"] = "monitor"
             st.session_state["driver_id"] = ""
             st.rerun()
@@ -388,6 +423,38 @@ def render_registration_page():
         st.rerun()
 
 
+@st.fragment(run_every="500ms")
+def render_live_monitoring(session):
+    event = session.latest()
+    if event is not None:
+        frame, metrics, state = event
+        st.session_state["monitor_frame"] = frame
+        st.session_state["monitor_metrics"] = metrics
+        st.session_state["monitor_state"] = state
+
+    if session.error is not None:
+        st.error(f"Monitoring stopped: {session.error}")
+        return
+
+    frame = st.session_state.get("monitor_frame")
+    if frame is None:
+        st.info("Starting camera...")
+    else:
+        st.image(frame, channels="BGR", caption="Live driver-monitoring stream", width="stretch")
+
+    state = st.session_state.get("monitor_state", "STARTING")
+    st.metric("Driver state", state)
+
+    metrics = st.session_state.get("monitor_metrics", {})
+    metric_columns = st.columns(4)
+    for column, (key, label) in zip(
+        metric_columns,
+        (("ear", "EAR"), ("perclos", "PERCLOS"), ("mar", "MAR"), ("pitch", "Head pitch")),
+    ):
+        value = metrics.get(key, 0)
+        column.metric(label, f"{value:.2f}" if isinstance(value, float) else value)
+
+
 def render_monitoring_page():
     st.title("Monitoring")
     driver_id = st.text_input(
@@ -404,7 +471,15 @@ def render_monitoring_page():
             st.rerun()
         return
 
-    driver = find_driver_by_id(driver_id)
+    try:
+        driver = find_driver_by_id(driver_id)
+    except DatabaseUnavailableError as exc:
+        st.error(
+            "The driver database is temporarily unavailable. "
+            "Check your internet connection and try again."
+        )
+        st.caption(str(exc))
+        return
 
     if driver is None:
         st.warning("Driver record not found. Check the identifier or register this driver first.")
@@ -415,16 +490,32 @@ def render_monitoring_page():
 
     st.success(f"Monitoring active for {driver.get('name', driver_id)}")
 
-    if "monitor_process" not in st.session_state:
-        st.session_state["monitor_process"] = None
+    if "monitor_session" not in st.session_state:
+        st.session_state["monitor_session"] = None
 
-    if st.session_state["monitor_process"] is None:
-        st.button("Start monitoring", on_click=lambda: st.session_state.__setitem__("monitor_process", start_monitoring_process(driver_id, {"name": driver.get("name")})))
+    if st.session_state["monitor_session"] is None:
+        if st.button("Start monitoring", type="primary"):
+            st.session_state["monitor_session"] = MonitoringSession(
+                driver_id,
+                {"name": driver.get("name")},
+            ).start()
+            st.rerun()
     else:
-        st.info("Monitoring process is running.")
-        st.button("Exit monitoring", on_click=lambda: (stop_monitoring_process(st.session_state["monitor_process"]), st.session_state.__setitem__("monitor_process", None)))
+        st.info("Monitoring is running in this Streamlit window.")
+        render_live_monitoring(st.session_state["monitor_session"])
+        if st.button("Exit monitoring"):
+            stop_monitoring_process(st.session_state["monitor_session"])
+            st.session_state["monitor_session"] = None
+            for key in ["monitor_frame", "monitor_metrics", "monitor_state"]:
+                st.session_state.pop(key, None)
+            st.rerun()
 
-    st.button("Back to dashboard", on_click=lambda: st.session_state.__setitem__("page", "landing"))
+    if st.button("Back to dashboard"):
+        if st.session_state["monitor_session"] is not None:
+            stop_monitoring_process(st.session_state["monitor_session"])
+            st.session_state["monitor_session"] = None
+        st.session_state["page"] = "landing"
+        st.rerun()
 
 
 def main():
@@ -447,7 +538,18 @@ def main():
         render_monitoring_page()
 
     if st.button("Reset session"):
-        for key in ["page", "driver_id", "baseline_summary", "monitor_process"]:
+        session = st.session_state.get("monitor_session")
+        if session is not None:
+            stop_monitoring_process(session)
+        for key in [
+            "page",
+            "driver_id",
+            "baseline_summary",
+            "monitor_session",
+            "monitor_frame",
+            "monitor_metrics",
+            "monitor_state",
+        ]:
             st.session_state.pop(key, None)
         st.rerun()
 

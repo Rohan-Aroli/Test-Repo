@@ -1,4 +1,5 @@
 import json
+from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
 
@@ -141,92 +142,10 @@ class ScoreRepository:
     ):
 
         payload = {
-            "trip_id":
-                features.trip_id,
-
-            "driver_id":
-                features.driver_id,
-
-            "duration_seconds":
-                features.duration_seconds,
-
-            "duration_hours":
-                features.duration_hours,
-
-            "avg_perclos":
-                features.avg_perclos,
-
-            "high_perclos_seconds":
-                features.high_perclos_seconds,
-
-            "high_perclos_time_pct":
-                features.high_perclos_time_pct,
-
-            "drowsy_seconds":
-                features.drowsy_seconds,
-
-            "drowsy_time_pct":
-                features.drowsy_time_pct,
-
-            "drowsy_episode_count":
-                features.drowsy_episode_count,
-
-            "drowsy_episode_rate":
-                features.drowsy_episode_rate,
-
-            "avg_drowsy_episode_duration":
-                features.avg_drowsy_episode_duration,
-
-            "max_drowsy_episode_duration":
-                features.max_drowsy_episode_duration,
-
-            "unresponsive_seconds":
-                features.unresponsive_seconds,
-
-            "unresponsive_time_pct":
-                features.unresponsive_time_pct,
-
-            "unresponsive_episode_count":
-                features.unresponsive_episode_count,
-
-            "unresponsive_rate":
-                features.unresponsive_rate,
-
-            "avg_blink_rate":
-                features.avg_blink_rate,
-
-            "blink_deviation":
-                features.blink_deviation,
-
-            "emergency_count":
-                features.emergency_count,
-
-            "emergency_rate":
-                features.emergency_rate,
-
-            "emergency_risk_rate":
-                features.emergency_risk_rate,
-
-            "avg_speed":
-                features.avg_speed,
-
-            "max_speed":
-                features.max_speed,
-
-            "avg_throttle":
-                features.avg_throttle,
-
-            "avg_brake":
-                features.avg_brake,
-
-            "steering_variability":
-                features.steering_variability,
-
-            "driver_data_coverage":
-                features.driver_data_coverage,
-
-            "vehicle_data_coverage":
-                features.vehicle_data_coverage,
+            field.name: self._json_value(
+                getattr(features, field.name)
+            )
+            for field in fields(type(features))
         }
 
         return (
@@ -252,6 +171,9 @@ class ScoreRepository:
 
             "trip_id":
                 trip_id,
+
+            "calculated_at":
+                datetime.now().isoformat(),
 
             "fatigue_score":
                 score.fatigue_score,
@@ -332,7 +254,15 @@ class ScoreRepository:
 
         from .models import TripFeatures
 
-        converted = dict(row)
+        feature_fields = {
+            field.name
+            for field in fields(TripFeatures)
+        }
+        converted = {
+            key: value
+            for key, value in dict(row).items()
+            if key in feature_fields
+        }
 
         calculated_at = converted.get("calculated_at")
         if isinstance(calculated_at, str):
@@ -346,3 +276,10 @@ class ScoreRepository:
         return TripFeatures(
             **converted
         )
+
+    @staticmethod
+    def _json_value(value):
+        """Convert Python datetime values to Supabase JSON values."""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value

@@ -9,12 +9,19 @@ last_payload = {}
 last_event_state = None
 database_writer = DatabaseWriter(supabase)
 status_callback = None
+score_callback = None
 EVENT_STATES = {"DROWSY", "UNRESPONSIVE", "MICROSLEEP", "DISTRACTION"}
 
 
 def set_status_callback(callback):
     global status_callback
     status_callback = callback
+
+
+def set_score_callback(callback):
+    """Register the live score persistence callback supplied by the monitor."""
+    global score_callback
+    score_callback = callback
 
 
 def report_status(message, success):
@@ -54,6 +61,10 @@ def push_driver_metrics(
 
     try:
         payload = _snapshot_payload(metrics, driver_state, frame_url)
+        event_transition = (
+            driver_state in EVENT_STATES
+            and driver_state != last_event_state
+        )
 
         if (
             last_payload
@@ -69,7 +80,13 @@ def push_driver_metrics(
             frame_url=frame_url,
         )
 
-        if trip_id and current_time - last_metric_write_time >= 1.0:
+        if (
+            trip_id
+            and (
+                current_time - last_metric_write_time >= 1.0
+                or event_transition
+            )
+        ):
             database_writer.write_driver_metrics(
                 metrics,
                 driver_id,
@@ -78,7 +95,7 @@ def push_driver_metrics(
             )
             last_metric_write_time = current_time
 
-        if driver_state in EVENT_STATES and driver_state != last_event_state:
+        if event_transition:
             event_metadata = {
                 "ear": metrics.get("ear"),
                 "perclos": metrics.get("perclos"),
@@ -98,8 +115,29 @@ def push_driver_metrics(
                 ),
                 metadata=event_metadata,
             )
+            database_writer.write_emergency_event(
+                event_type=driver_state,
+                severity=(
+                    "critical" if driver_state == "UNRESPONSIVE" else "warning"
+                ),
+                event_message=(
+                    f"Driver state changed to {driver_state}"
+                    + (
+                        f"; evidence_frame={frame_url}"
+                        if frame_url
+                        else ""
+                    )
+                ),
+                driver_id=driver_id,
+                trip_id=trip_id,
+                resolved=False,
+            )
             last_event_state = driver_state
             print(f"[EVENT] {driver_state} recorded for {driver_id}")
+
+            if score_callback is not None and trip_id:
+                score_callback(driver_id, trip_id)
+
         elif driver_state not in EVENT_STATES:
             last_event_state = None
 

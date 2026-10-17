@@ -254,3 +254,14 @@ class DriverScore:
 
     # Versioning
     normalization_version: str
+
+
+@dataclass
+class FinalizationResult:
+    """
+    Outcome of finalizing and persisting one driving trip score.
+    """
+
+    success: bool
+    score: Optional[DriverScore]
+    error: Optional[str]

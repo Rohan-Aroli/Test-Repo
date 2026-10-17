@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -52,7 +52,10 @@ def test_trip_features_have_calculated_at():
         [],
     )
 
-    assert features.calculated_at == context.trip_end
+    assert features.calculated_at == context.trip_end.replace(
+        tzinfo=timezone.utc
+    )
+    assert context.trip_end.tzinfo is None
 
 
 def test_driver_rows_outside_trip_are_ignored():
@@ -259,3 +262,161 @@ def test_empty_input_returns_missing_optional_features():
     assert features.emergency_count == 0
     assert features.driver_data_coverage == 0.0
     assert features.vehicle_data_coverage == 0.0
+
+
+def test_naive_context_boundaries_accept_aware_utc_telemetry():
+    context = make_context(minutes=1)
+    rows = [
+        {
+            "created_at": BASE.replace(tzinfo=timezone.utc)
+            + timedelta(seconds=30),
+            "perclos": 0.10,
+        }
+    ]
+
+    features = TripFeatureExtractor().extract(
+        context,
+        rows,
+        [],
+        [],
+    )
+
+    assert features.avg_perclos == pytest.approx(0.10)
+    assert context.trip_start.tzinfo is None
+
+
+def test_z_and_nonzero_offset_timestamps_are_normalized_to_utc():
+    context = TripContext(
+        trip_id="trip-1",
+        driver_id="driver-1",
+        trip_start=datetime(
+            2026, 8, 21, 10, 0, 0,
+            tzinfo=timezone.utc,
+        ),
+        trip_end=datetime(
+            2026, 8, 21, 10, 1, 0,
+            tzinfo=timezone.utc,
+        ),
+    )
+    rows = [
+        {
+            "created_at": "2026-08-21T10:00:10Z",
+            "perclos": 0.10,
+        },
+        {
+            "created_at": "2026-08-21T12:00:20+02:00",
+            "perclos": 0.20,
+        },
+    ]
+
+    features = TripFeatureExtractor().extract(
+        context,
+        rows,
+        [],
+        [],
+    )
+
+    assert features.avg_perclos == pytest.approx(0.18)
+
+
+def test_naive_telemetry_timestamp_is_interpreted_as_utc():
+    context = TripContext(
+        trip_id="trip-1",
+        driver_id="driver-1",
+        trip_start=datetime(
+            2026, 8, 21, 10, 0, 0,
+            tzinfo=timezone.utc,
+        ),
+        trip_end=datetime(
+            2026, 8, 21, 10, 1, 0,
+            tzinfo=timezone.utc,
+        ),
+    )
+    rows = [
+        {
+            # Naive telemetry timestamps are explicitly interpreted as UTC.
+            "created_at": datetime(2026, 8, 21, 10, 0, 30),
+            "perclos": 0.10,
+        }
+    ]
+
+    features = TripFeatureExtractor().extract(
+        context,
+        rows,
+        [],
+        [],
+    )
+
+    assert features.avg_perclos == pytest.approx(0.10)
+
+
+def test_negative_offset_timestamp_inside_trip_is_included():
+    context = TripContext(
+        trip_id="trip-1",
+        driver_id="driver-1",
+        trip_start=datetime(
+            2026, 8, 21, 10, 0, 0,
+            tzinfo=timezone.utc,
+        ),
+        trip_end=datetime(
+            2026, 8, 21, 10, 1, 0,
+            tzinfo=timezone.utc,
+        ),
+    )
+    rows = [
+        {
+            "created_at": "2026-08-21T05:00:30-05:00",
+            "perclos": 0.10,
+        }
+    ]
+
+    features = TripFeatureExtractor().extract(
+        context,
+        rows,
+        [],
+        [],
+    )
+
+    assert features.avg_perclos == pytest.approx(0.10)
+
+
+def test_missing_and_invalid_timestamps_are_skipped():
+    rows = [
+        {"perclos": 0.10},
+        {"created_at": "invalid", "perclos": 0.20},
+        metric(30, perclos=0.30),
+    ]
+
+    features = TripFeatureExtractor().extract(
+        make_context(minutes=1),
+        rows,
+        [],
+        [],
+    )
+
+    assert features.avg_perclos == pytest.approx(0.30)
+
+
+def test_trip_boundaries_are_inclusive_and_outside_rows_are_excluded():
+    context = make_context(minutes=1)
+    rows = [
+        metric(0, perclos=0.10),
+        metric(60, perclos=0.20),
+        {
+            "created_at": BASE - timedelta(microseconds=1),
+            "perclos": 0.90,
+        },
+        {
+            "created_at": context.trip_end + timedelta(microseconds=1),
+            "perclos": 0.90,
+        },
+    ]
+
+    features = TripFeatureExtractor().extract(
+        context,
+        rows,
+        [],
+        [],
+    )
+
+    assert features.avg_perclos == pytest.approx(0.10)
