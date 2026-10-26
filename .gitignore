@@ -4,11 +4,18 @@ __pycache__/
 # Virtual environments
 .venv/
 
+# Environment files & local secrets
+.env
+.env.*
+.env.local
+*.env
+!.env.example
+!.env.template
 
 # Temp file
 tempCodeRunnerFile.py
 
-#json in shared folder
+# JSON in shared folder
 shared/driver_state.json
 
 # Generated archive exceeds GitHub's file-size limit

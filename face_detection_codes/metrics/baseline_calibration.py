@@ -43,16 +43,18 @@ class BaselineCalibrator:
     # -----------------------------------
     # Set active driver
     # -----------------------------------
-    def set_driver(self, driver_id):
+    def set_driver(self, driver_id, alias=None):
 
+        self.driver_id = str(driver_id).strip() if driver_id else "default_driver"
+        self.alias = str(alias).strip() if alias else None
         self.save_path = (
             self.baseline_folder /
-            f"{driver_id}.json"
+            f"{self.driver_id}.json"
         )
 
         print(
             f"[CALIBRATOR] Active Driver: "
-            f"{driver_id}"
+            f"{self.driver_id}"
         )
 
     # -----------------------------------
@@ -240,27 +242,32 @@ class BaselineCalibrator:
     def load_baseline(self):
 
         try:
+            candidates = [self.save_path]
+            if hasattr(self, "driver_id") and self.driver_id:
+                candidates.extend([
+                    self.baseline_folder / f"{self.driver_id}.json",
+                    Path("baselines") / f"{self.driver_id}.json",
+                    Path(__file__).resolve().parent.parent / "baselines" / f"{self.driver_id}.json",
+                ])
+            if hasattr(self, "alias") and self.alias:
+                candidates.extend([
+                    self.baseline_folder / f"{self.alias}.json",
+                    Path("baselines") / f"{self.alias}.json",
+                    Path(__file__).resolve().parent.parent / "baselines" / f"{self.alias}.json",
+                ])
 
-            if self.save_path is None:
+            for p in candidates:
+                if p and Path(p).exists() and Path(p).is_file():
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and len(data) > 0:
+                        self.baseline = data
+                        self.calibrated = True
+                        self.save_path = Path(p)
+                        print(f"[BASELINE LOADED] {self.save_path}")
+                        return True
 
-                raise ValueError(
-                    "Driver not selected"
-                )
-
-            with open(
-                    self.save_path,
-                    "r") as f:
-
-                self.baseline = json.load(f)
-
-            self.calibrated = True
-
-            print(
-                f"[BASELINE LOADED] "
-                f"{self.save_path}"
-            )
-
-            return True
+            return False
 
         except Exception:
 

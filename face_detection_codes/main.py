@@ -39,6 +39,7 @@ from core.logger import (
     write_state_periodically,
     write_scores_periodically
 )
+from core.arduino_client import ArduinoCommunicator
 
 from DriverScore.db_repository import ScoreRepository
 from DriverScore.models import (
@@ -64,6 +65,7 @@ head_pose_estimator = HeadPoseEstimator()
 driver_manager = DriverManager()
 mode_manager = SystemModeManager()
 database_writer = DatabaseWriter(supabase)
+arduino_communicator = ArduinoCommunicator()
 dashboard_callback = None
 stop_requested = threading.Event()
 
@@ -92,10 +94,13 @@ def request_stop():
 
 
 def prompt_optional(label):
-    if os.getenv("DASHBOARD_MODE") == "1":
+    if os.getenv("DASHBOARD_MODE") == "1" or os.getenv("DRY_RUN") == "1" or not sys.stdin.isatty():
         return None
-    value = input(f"{label} (optional): ").strip()
-    return value or None
+    try:
+        value = input(f"{label} (optional): ").strip()
+        return value or None
+    except (EOFError, OSError):
+        return None
 
 
 def register_new_driver(identifier):
@@ -103,10 +108,13 @@ def register_new_driver(identifier):
     profile_json = os.getenv("DRIVER_PROFILE_JSON")
     profile_values = json.loads(profile_json) if profile_json else {}
     name = profile_values.get("name")
-    if not name and os.getenv("DASHBOARD_MODE") != "1":
-        name = input("Name: ").strip()
+    if not name and os.getenv("DASHBOARD_MODE") != "1" and os.getenv("DRY_RUN") != "1" and sys.stdin.isatty():
+        try:
+            name = input("Name: ").strip()
+        except (EOFError, OSError):
+            name = None
     if not name:
-        raise ValueError("Driver name is required.")
+        name = f"Driver {identifier}"
 
     age_text = profile_values.get("age") or prompt_optional("Age")
     age = int(age_text) if age_text else None
@@ -137,62 +145,70 @@ def register_new_driver(identifier):
 
 entered_driver_id = os.getenv("DRIVER_ID")
 if not entered_driver_id:
-    entered_driver_id = input(
-        "Enter employee ID or driver UUID: "
-    ).strip().lower()
-driver_profile = database_writer.find_driver(entered_driver_id)
+    if sys.stdin.isatty():
+        try:
+            entered_driver_id = input(
+                "\n👤 Enter employee ID or driver identifier (e.g. 007, driver_1): "
+            ).strip()
+        except (EOFError, OSError):
+            entered_driver_id = None
+if not entered_driver_id:
+    entered_driver_id = "default_driver"
+
+try:
+    driver_profile = database_writer.find_driver(entered_driver_id)
+except Exception as e:
+    print(f"[DB NOTICE] Supabase driver lookup unavailable: {e}")
+    driver_profile = None
 
 if not driver_profile:
-    driver_profile = register_new_driver(entered_driver_id)
+    try:
+        driver_profile = register_new_driver(entered_driver_id)
+    except Exception as e:
+        print(f"[DB NOTICE] Offline mode: driver registration skipped ({e})")
+        driver_profile = {"id": entered_driver_id, "name": f"Driver {entered_driver_id}"}
 
-driver_id = driver_profile["id"]
+driver_id = entered_driver_id
+driver_manager.set_driver(driver_id)
 
-driver_manager.set_driver(
-    driver_id
-)
-
-calibrator = BaselineCalibrator(
-    calibration_time=60
-)
-
-calibrator.set_driver(
-    driver_id
-)
+calibrator = BaselineCalibrator(calibration_time=60)
+calibrator.set_driver(driver_id, alias=driver_profile.get("id"))
 
 if calibrator.load_baseline():
-
-    print(
-        "[INFO] Existing baseline loaded"
-    )
-
-    mode_manager.set_mode(
-        "MONITORING"
-    )
-
+    print(f"[INFO] Existing baseline loaded for driver '{driver_id}'")
+    mode_manager.set_mode("MONITORING")
 else:
-
-    print(
-        "[INFO] No baseline found."
-    )
-
-    mode_manager.set_mode(
-        "CALIBRATION"
-    )
+    print(f"[INFO] No baseline found for driver '{driver_id}'. New driver detected.")
+    print(f"[CALIBRATION] Starting calibration for driver '{driver_id}' ({calibrator.calibration_time}s baseline)...")
+    mode_manager.set_mode("CALIBRATION")
 
 classifier = EnhancedDriverStateClassifier(
     profile=calibrator.get_baseline()
 )
 drowsy_detector.ear_threshold = classifier.get_ear_threshold()
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-if not cap.isOpened():
-    raise RuntimeError("Unable to open camera device 0.")
-print(
-    f"[CAMERA] opened=True size="
-    f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
-    f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
-)
+
+if os.getenv("DRY_RUN") == "1":
+    cap = cv2.VideoCapture(0)
+    print("[WARNING] Running in DRY_RUN mode.")
+else:
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Unable to open camera device 0.")
+    print(
+        f"[CAMERA] opened=True size="
+        f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+        f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+    )
+
 detector = FaceDetector()
 extractor = EyeLandmarkExtractor()
+try:
+    arduino_communicator.start()
+except Exception as e:
+    print(f"[WARNING] Failed to start Arduino communicator: {e}")
+
 last_uploaded_state = None
 trip_start_time = datetime.now(timezone.utc)
 trip_persistence_error = None
@@ -202,8 +218,8 @@ try:
         trip_start_time,
         driver_profile,
     )
-    current_trip_id = trip["trip_id"]
-    trip_persisted = True
+    current_trip_id = trip.get("trip_id") if isinstance(trip, dict) else None
+    trip_persisted = bool(current_trip_id)
 except Exception as error:
     # Live camera monitoring can continue when Supabase trips INSERT is denied
     # by RLS. Historical trip writes remain disabled for this session.
@@ -341,14 +357,26 @@ def run_face_detection():
 
     while not stop_requested.is_set():
         try:
-            ret, frame = cap.read()
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+            elif os.getenv("DRY_RUN") == "1":
+                import numpy as np
+                ret, frame = True, np.zeros((480, 640, 3), dtype=np.uint8)
+            else:
+                ret, frame = False, None
 
             if not ret or frame is None:
-                now = time.monotonic()
-                if now - last_frame_warning >= 1.0:
-                    print("[ERROR] Camera frame not received")
-                    last_frame_warning = now
-                continue
+                if os.getenv("DRY_RUN") == "1":
+                    import numpy as np
+                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    ret = True
+                else:
+                    now = time.monotonic()
+                    if now - last_frame_warning >= 1.0:
+                        print("[ERROR] Camera frame not received")
+                        last_frame_warning = now
+                    time.sleep(0.1)
+                    continue
 
             raw_frame = frame.copy()
             frame_url = None
@@ -693,6 +721,7 @@ def run_face_detection():
                 print(f"[WARNING] JSON logging failed: {e}")
 
             print(f"[STATE] {driver_state}")
+            arduino_communicator.update_state(driver_state)
 
             dashboard_update(frame, metrics, driver_state)
 
@@ -823,18 +852,23 @@ def run_face_detection():
                     2
                 )
 
-            if os.getenv("DASHBOARD_MODE") != "1":
+            if os.getenv("DASHBOARD_MODE") != "1" and os.getenv("HEADLESS") != "1" and os.getenv("DRY_RUN") != "1":
                 cv2.imshow("Driver Monitoring System", frame)
 
                 if cv2.waitKey(1) & 0xFF == 27:
                     print("[INFO] Exiting system...")
                     break
+            elif os.getenv("DRY_RUN") == "1":
+                print("[INFO] Dry run single cycle completed successfully.")
+                break
 
         except Exception as e:
             print(f"[CRITICAL ERROR] Main loop failure: {e}")
             continue
 
-    cap.release()
+    arduino_communicator.close()
+    if cap is not None and hasattr(cap, "release") and cap.isOpened():
+        cap.release()
     cv2.destroyAllWindows()
     result = finalize_trip_score()
     if not result.success:
@@ -856,6 +890,7 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("[INFO] System stopped manually")
+        arduino_communicator.close()
         result = finalize_trip_score()
         if not result.success:
             print(

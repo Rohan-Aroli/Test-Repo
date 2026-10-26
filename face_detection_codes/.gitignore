@@ -12,6 +12,10 @@ facedetection/
 # Local secrets and tool configuration
 .env
 .env.*
+.env.local
+*.env
+!.env.example
+!.env.template
 opencode.json
 
 # Archives and temporary files
@@ -21,7 +25,6 @@ tempCodeRunnerFile.py
 
 # Local calibration and generated data
 baselines/
-
 
 # Coverage output
 .coverage

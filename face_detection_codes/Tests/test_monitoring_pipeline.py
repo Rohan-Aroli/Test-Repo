@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from detection import face_detection
+pytest.importorskip("streamlit")
 from streamlit_app import MonitoringSession
 
 
